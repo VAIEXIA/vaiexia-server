@@ -5,6 +5,10 @@ use std::sync::Arc;
 
 use vaiexia_core::protocol::Seq;
 
+pub mod jobs_pump;
+pub mod logs_pump;
+pub mod metrics_pump;
+pub mod status_pump;
 pub mod topics;
 
 // ── SeqCounter ────────────────────────────────────────────────────────────────
