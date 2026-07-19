@@ -19,3 +19,9 @@ async-trait = "0.1"
 base64 = "0.22"
 vaiexia-core = { path = "../vaiexia-core", features = ["server-http"] }
 uuid = { version = "1", features = ["v4"] }
+blake3 = "1"
+subtle = "2"
+base32 = "0.5"
+getrandom = "0.2"
+argon2 = "0.5"
+arc-swap = "1"
