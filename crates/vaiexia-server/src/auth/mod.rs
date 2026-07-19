@@ -6,3 +6,5 @@ pub mod password;
 pub mod policy;
 pub mod store;
 pub mod ratelimit;
+pub mod verifier;
+pub use verifier::DaemonVerifier;
