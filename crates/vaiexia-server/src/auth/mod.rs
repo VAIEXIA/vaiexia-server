@@ -8,3 +8,4 @@ pub mod store;
 pub mod ratelimit;
 pub mod verifier;
 pub use verifier::DaemonVerifier;
+pub mod bootstrap;
