@@ -94,6 +94,7 @@ mod tests {
                 cert: None,
                 key: None,
             }],
+            ..Default::default()
         }
     }
 
@@ -120,6 +121,7 @@ mod tests {
                 cert: Some(PathBuf::from("/tmp/cert.pem")),
                 key: Some(PathBuf::from("/tmp/key.pem")),
             }],
+            ..Default::default()
         };
         let err = start_listeners(&cfg, svc).await.unwrap_err();
         assert!(matches!(err, TransportError::HttpsNotYetImplemented));
@@ -136,6 +138,7 @@ mod tests {
                 cert: None,
                 key: None,
             }],
+            ..Default::default()
         };
         let err = start_listeners(&cfg, svc).await.unwrap_err();
         assert!(matches!(err, TransportError::ObfsDeferred));

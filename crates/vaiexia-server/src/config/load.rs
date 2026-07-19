@@ -109,7 +109,7 @@ bind = "127.0.0.1:7443"
 
     #[test]
     fn validate_empty_listeners_returns_err() {
-        let cfg = ServerConfig { state_dir: PathBuf::from("/var/lib/vaiexia"), listeners: vec![] };
+        let cfg = ServerConfig { state_dir: PathBuf::from("/var/lib/vaiexia"), listeners: vec![], ..Default::default() };
         assert!(matches!(validate(&cfg), Err(ConfigError::Empty)));
     }
 
@@ -123,6 +123,7 @@ bind = "127.0.0.1:7443"
                 cert: None,
                 key: None,
             }],
+            ..Default::default()
         };
         assert!(matches!(validate(&cfg), Err(ConfigError::ObfsDeferred)));
     }
@@ -137,6 +138,7 @@ bind = "127.0.0.1:7443"
                 cert: None,
                 key: None,
             }],
+            ..Default::default()
         };
         assert!(matches!(validate(&cfg), Err(ConfigError::TlsMaterialMissing)));
     }
@@ -151,6 +153,7 @@ bind = "127.0.0.1:7443"
                 cert: None,
                 key: None,
             }],
+            ..Default::default()
         };
         let warnings = validate(&cfg).unwrap();
         assert!(!warnings.is_empty());

@@ -8,7 +8,7 @@ pub mod lifecycle;
 pub mod transport;
 
 use std::sync::{Arc, Mutex};
-use crate::backend::{SystemBackend, mock::MockBackend};
+use crate::backend::assemble::assemble;
 use crate::auth::bootstrap::BootstrapState;
 use crate::auth::store::{FileStore, IdentityStore};
 
@@ -36,9 +36,8 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
         BootstrapState::begin(store.is_empty(), code_path),
     ));
 
-    // Step 0/1 backend = mock (real sysinfo/systemd = Step 3).
-    let mock = Arc::new(MockBackend::new());
-    let backend = Arc::new(SystemBackend::from_mock(mock));
+    // Assemble backend from config (Auto/Mock/Real mode).
+    let backend = Arc::new(assemble(&cfg)?);
 
     let (service, pump_handles) = lifecycle::build_service(backend, store, bootstrap);
     let handles = transport::start_listeners(&cfg, service).await?;

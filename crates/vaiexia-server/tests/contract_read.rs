@@ -19,6 +19,7 @@ fn make_config(bind: &str) -> ServerConfig {
             cert: None,
             key: None,
         }],
+        ..Default::default()
     }
 }
 

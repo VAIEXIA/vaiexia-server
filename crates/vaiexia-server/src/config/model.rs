@@ -21,11 +21,38 @@ pub struct Listener {
     // obfs-* fields (server_key/profile/allowed_client_keys) reserved; parsed in a later step.
 }
 
+/// How the daemon selects backend providers at startup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum BackendMode {
+    /// Use real providers where the platform supports them; degrade to None otherwise.
+    #[default]
+    Auto,
+    /// Always use the in-process mock (deterministic, no OS dependencies).
+    Mock,
+    /// Require all real providers; return an error if the platform does not support them.
+    Real,
+}
+
+/// Backend selection configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackendCfg {
+    pub mode: BackendMode,
+}
+
+impl Default for BackendCfg {
+    fn default() -> Self {
+        Self { mode: BackendMode::Auto }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ServerConfig {
     pub state_dir: PathBuf,
     pub listeners: Vec<Listener>,
+    pub backend: BackendCfg,
 }
 
 impl Default for ServerConfig {
@@ -38,6 +65,7 @@ impl Default for ServerConfig {
                 cert: None,
                 key: None,
             }],
+            backend: BackendCfg::default(),
         }
     }
 }

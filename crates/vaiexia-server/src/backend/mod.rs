@@ -1,3 +1,4 @@
+pub mod assemble;
 pub mod error;
 pub mod metrics;
 pub mod mock;
@@ -15,6 +16,7 @@ pub use unit_name::UnitName;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use sysinfo::System as SysinfoSystem;
 
 // ── HostInfoProvider (Step 0, unchanged) ────────────────────────────────────
 
@@ -72,6 +74,33 @@ pub trait LogProvider: Send + Sync {
     async fn query(&self, q: &LogQuery) -> Result<Page<LogEntry>, BackendError>;
     /// A follow stream feeding the `server.logs` pump (each entry carries its cursor).
     fn follow(&self) -> broadcast::Receiver<LogEntry>;
+}
+
+// ── RealHostInfoProvider ─────────────────────────────────────────────────────
+
+/// A host info provider backed by real OS calls.
+pub struct RealHostInfoProvider;
+
+impl HostInfoProvider for RealHostInfoProvider {
+    fn host_info(&self) -> Result<HostInfo, BackendError> {
+        Ok(HostInfo {
+            hostname: SysinfoSystem::host_name().unwrap_or_else(|| "unknown".to_string()),
+            os: SysinfoSystem::long_os_version()
+                .unwrap_or_else(|| SysinfoSystem::name().unwrap_or_else(|| "unknown".to_string())),
+            kernel: SysinfoSystem::kernel_version().unwrap_or_else(|| "unknown".to_string()),
+            arch: std::env::consts::ARCH.to_string(),
+        })
+    }
+
+    fn capabilities(&self) -> BackendCapabilities {
+        // Capabilities are tracked externally in SystemBackend.caps — this is a stub.
+        BackendCapabilities {
+            services: false,
+            packages: false,
+            metrics: true,
+            logs: false,
+        }
+    }
 }
 
 // ── SystemBackend aggregate ──────────────────────────────────────────────────
