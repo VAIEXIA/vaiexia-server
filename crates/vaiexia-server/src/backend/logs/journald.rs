@@ -74,7 +74,9 @@ pub fn parse_journal_line(bytes: &[u8]) -> Option<LogEntry> {
 
 /// Build the argv for `journalctl -o json --no-pager` from a `LogQuery`.
 ///
-/// - unit: passed as `-u <unit>` (validated newtype, no shell metachars)
+/// - unit: passed as `-u <unit>` (validated via `UnitName` at the API handler
+///   before it reaches here; also an option-argument, so never re-parsed as a
+///   flag by journalctl)
 /// - since_us: `--since` (converted from microseconds to ISO-like seconds)
 /// - until_us: `--until`
 /// - limit (> 0): `-n <n>`

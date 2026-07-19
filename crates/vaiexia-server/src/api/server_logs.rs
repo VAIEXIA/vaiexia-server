@@ -7,7 +7,7 @@ use vaiexia_core::server::ServiceBuilder;
 
 use crate::api::dto::{LogEntryDto, PageDto};
 use crate::api::register_scoped;
-use crate::backend::{LogQuery, SystemBackend};
+use crate::backend::{LogQuery, SystemBackend, UnitName};
 use crate::diag::{backend_error_to_diagnostic, domain_codes};
 
 const MAX_LIMIT: u32 = 1000;
@@ -35,6 +35,19 @@ pub async fn logs_query_result(
     }
     if params.limit == 0 {
         return Err(Diagnostic::error(codes::INVALID_PARAMS, "limit must be > 0"));
+    }
+
+    // Validate the unit filter through the UnitName newtype. It is passed to
+    // `journalctl -u <unit>`; even though it is an option-argument (not itself
+    // option-injectable), an unvalidated value would permit journalctl glob
+    // patterns like `*` (match every unit) and arbitrary junk. Rejecting here
+    // enforces the "validated newtype" contract build_argv documents.
+    if params
+        .unit
+        .as_deref()
+        .is_some_and(|u| UnitName::parse(u).is_err())
+    {
+        return Err(Diagnostic::error(codes::INVALID_PARAMS, "invalid unit name"));
     }
 
     let provider = be
@@ -110,6 +123,48 @@ mod tests {
         let params = LogsQueryParams { unit: None, since: None, until: None, limit: 1001, cursor: None };
         let err = logs_query_result(&be, params).await.unwrap_err();
         assert_eq!(err.code, codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn logs_query_rejects_glob_unit() {
+        // journalctl -u accepts globs; `*` must be rejected by UnitName validation.
+        let be = full_backend();
+        let params = LogsQueryParams {
+            unit: Some("*".into()),
+            since: None,
+            until: None,
+            limit: 10,
+            cursor: None,
+        };
+        let err = logs_query_result(&be, params).await.unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn logs_query_rejects_junk_unit() {
+        let be = full_backend();
+        let params = LogsQueryParams {
+            unit: Some("../etc/shadow".into()),
+            since: None,
+            until: None,
+            limit: 10,
+            cursor: None,
+        };
+        let err = logs_query_result(&be, params).await.unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn logs_query_accepts_valid_unit() {
+        let be = full_backend();
+        let params = LogsQueryParams {
+            unit: Some("nginx.service".into()),
+            since: None,
+            until: None,
+            limit: 10,
+            cursor: None,
+        };
+        assert!(logs_query_result(&be, params).await.is_ok());
     }
 
     #[tokio::test]
