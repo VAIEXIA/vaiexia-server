@@ -1,10 +1,12 @@
 use std::sync::Arc;
 use serde::Deserialize;
+use vaiexia_core::auth::Subject;
 use vaiexia_core::diagnostic::Diagnostic;
 use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 
 use crate::api::dto::HostInfoDto;
+use crate::api::register_scoped;
 use crate::backend::SystemBackend;
 use crate::diag::backend_error_to_diagnostic;
 
@@ -18,7 +20,7 @@ pub struct HostInfoParams {} // {} — no params
 
 pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>) -> ServiceBuilder {
     let method = Method::new("server.host.info").expect("valid method");
-    builder.method_typed(method, move |_p: HostInfoParams, _subject| {
+    register_scoped(builder, method, move |_p: HostInfoParams, _subject: Subject| {
         let be = Arc::clone(&be);
         async move { host_info_result(&be) }
     })

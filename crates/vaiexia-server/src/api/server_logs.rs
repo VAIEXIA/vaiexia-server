@@ -1,10 +1,12 @@
 use std::sync::Arc;
 use serde::Deserialize;
+use vaiexia_core::auth::Subject;
 use vaiexia_core::diagnostic::{codes, Diagnostic};
 use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 
 use crate::api::dto::{LogEntryDto, PageDto};
+use crate::api::register_scoped;
 use crate::backend::{LogQuery, SystemBackend};
 use crate::diag::{backend_error_to_diagnostic, domain_codes};
 
@@ -59,7 +61,7 @@ pub async fn logs_query_result(
 
 pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>) -> ServiceBuilder {
     let query_method = Method::new("server.logs.query").expect("valid method");
-    builder.method_typed(query_method, move |p: LogsQueryParams, _subject| {
+    register_scoped(builder, query_method, move |p: LogsQueryParams, _subject: Subject| {
         let be = Arc::clone(&be);
         async move { logs_query_result(&be, p).await }
     })

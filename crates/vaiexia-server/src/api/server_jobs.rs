@@ -1,10 +1,12 @@
 use std::sync::Arc;
 use serde::Deserialize;
+use vaiexia_core::auth::Subject;
 use vaiexia_core::diagnostic::Diagnostic;
 use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 
 use crate::api::jobs::{JobRegistry, JobStatus};
+use crate::api::register_scoped;
 use crate::diag::domain_codes;
 
 // ── Params ───────────────────────────────────────────────────────────────────
@@ -29,7 +31,7 @@ pub fn jobs_status_result(
 
 pub fn register(builder: ServiceBuilder, registry: Arc<JobRegistry>) -> ServiceBuilder {
     let status_method = Method::new("server.jobs.status").expect("valid method");
-    builder.method_typed(status_method, move |p: JobsStatusParams, _subject| {
+    register_scoped(builder, status_method, move |p: JobsStatusParams, _subject: Subject| {
         let registry = Arc::clone(&registry);
         async move { jobs_status_result(&registry, p) }
     })

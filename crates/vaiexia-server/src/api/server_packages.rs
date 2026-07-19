@@ -1,5 +1,6 @@
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
+use vaiexia_core::auth::Subject;
 use vaiexia_core::diagnostic::{codes, Diagnostic};
 use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
@@ -7,6 +8,7 @@ use vaiexia_priv_proto::PackageName;
 
 use crate::api::dto::{PackageDto, PageDto};
 use crate::api::jobs::JobRegistry;
+use crate::api::register_scoped;
 use crate::backend::SystemBackend;
 use crate::diag::{backend_error_to_diagnostic, domain_codes};
 
@@ -100,7 +102,7 @@ pub async fn packages_remove_result(
 pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>, registry: Arc<JobRegistry>) -> ServiceBuilder {
     let be1 = Arc::clone(&be);
     let list_method = Method::new("server.packages.list").expect("valid method");
-    let builder = builder.method_typed(list_method, move |p: PackagesListParams, _subject| {
+    let builder = register_scoped(builder, list_method, move |p: PackagesListParams, _subject: Subject| {
         let be = Arc::clone(&be1);
         async move { packages_list_result(&be, p).await }
     });
@@ -108,7 +110,7 @@ pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>, registry: Arc<J
     let be2 = Arc::clone(&be);
     let reg2 = Arc::clone(&registry);
     let install_method = Method::new("server.packages.install").expect("valid method");
-    let builder = builder.method_typed(install_method, move |p: PackageMutateParams, _subject| {
+    let builder = register_scoped(builder, install_method, move |p: PackageMutateParams, _subject: Subject| {
         let be = Arc::clone(&be2);
         let reg = Arc::clone(&reg2);
         async move { packages_install_result(&be, &reg, p).await }
@@ -117,7 +119,7 @@ pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>, registry: Arc<J
     let be3 = Arc::clone(&be);
     let reg3 = Arc::clone(&registry);
     let remove_method = Method::new("server.packages.remove").expect("valid method");
-    builder.method_typed(remove_method, move |p: PackageMutateParams, _subject| {
+    register_scoped(builder, remove_method, move |p: PackageMutateParams, _subject: Subject| {
         let be = Arc::clone(&be3);
         let reg = Arc::clone(&reg3);
         async move { packages_remove_result(&be, &reg, p).await }
