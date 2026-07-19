@@ -51,13 +51,13 @@ pub fn validate(cfg: &ServerConfig) -> Result<Vec<String>, ConfigError> {
             }
             ListenerKind::Http => {
                 // Warn if the HTTP listener is not on loopback.
-                if let Ok(addr) = l.bind.parse::<SocketAddr>() {
-                    if !addr.ip().is_loopback() {
-                        warnings.push(format!(
-                            "http listener on non-loopback address {} — consider using https",
-                            l.bind
-                        ));
-                    }
+                if let Ok(addr) = l.bind.parse::<SocketAddr>()
+                    && !addr.ip().is_loopback()
+                {
+                    warnings.push(format!(
+                        "http listener on non-loopback address {} — consider using https",
+                        l.bind
+                    ));
                 }
             }
         }

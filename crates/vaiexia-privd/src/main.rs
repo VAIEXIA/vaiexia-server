@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod handler;
 fn main() {
     eprintln!("vaiexia-privd: socket activation + package verbs land in Step 3");
