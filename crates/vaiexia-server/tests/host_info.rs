@@ -6,7 +6,7 @@ use vaiexia_core::version::ProtoVersion;
 use vaiexia_server::{
     backend::{SystemBackend, mock::MockBackend},
     config::{Listener, ListenerKind, ServerConfig},
-    lifecycle::build_service,
+    lifecycle::build_service_permissive as build_service,
     transport::start_listeners,
 };
 

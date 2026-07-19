@@ -13,7 +13,7 @@ use vaiexia_server::{
     api::dto::{LogEntryDto, MetricsDto},
     backend::{mock::MockBackend, LogEntry, SystemBackend},
     events::topics,
-    lifecycle::build_service,
+    lifecycle::build_service_permissive as build_service,
 };
 
 async fn rpc(

@@ -12,9 +12,17 @@ impl Verifier for SkeletonVerifier {
         _cap: Option<&Capability>,
         _method: &Method,
     ) -> vaiexia_core::error::Result<Subject> {
+        // Grant all known scopes so register_scoped's scope guard never blocks
+        // during permissive (test-only) use.
         Ok(Subject {
             id: SubjectId::new("anonymous"),
-            scopes: ScopeSet::from_iter(["server.read"]),
+            scopes: ScopeSet::from_iter([
+                "server.read",
+                "server.logs.read",
+                "server.services.write",
+                "server.packages.write",
+                "auth.admin",
+            ]),
         })
     }
 }

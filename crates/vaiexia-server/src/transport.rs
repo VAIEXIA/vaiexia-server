@@ -73,7 +73,7 @@ mod tests {
     use std::sync::Arc;
     use crate::backend::{SystemBackend, mock::MockBackend};
     use crate::config::{Listener, ListenerKind, ServerConfig};
-    use crate::lifecycle::build_service;
+    use crate::lifecycle::build_service_permissive as build_service;
     use std::path::PathBuf;
 
     fn make_service() -> Arc<Service> {
