@@ -93,13 +93,35 @@ pub fn peer_uid(stream: &UnixStream) -> Option<u32> {
     if ret == 0 { Some(cred.uid) } else { None }
 }
 
+/// Max bytes of child stderr surfaced back to the caller (defense against a
+/// chatty manager both wedging the drain thread and bloating the response).
+const MAX_STDERR_CAPTURE: usize = 64 * 1024;
+
+/// Truncate a string to at most `max` bytes on a char boundary, appending an
+/// ellipsis marker when clipped. Keeps error messages bounded.
+fn clip(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... (truncated)", &s[..end])
+}
+
 /// Run a package operation subprocess.
 ///
-/// - Uses absolute path from argv[0]
-/// - Clears env
-/// - Hard timeout via thread join with deadline
+/// - Uses absolute path from argv[0] (built by `verb_to_argv`, never PATH)
+/// - Clears env (no `LD_PRELOAD`/`APT::`/`DEB_*` influence)
+/// - Discards stdin/stdout; drains stderr on a helper thread so a full pipe
+///   cannot deadlock the wait loop
+/// - Enforces a HARD timeout: a hung manager is killed at `EXEC_TIMEOUT`
 /// - Returns Ok/Error PrivResponse
 fn run_exec(argv: &[String]) -> PrivResponse {
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
     if argv.is_empty() {
         return PrivResponse::Error { message: "empty argv".into() };
     }
@@ -108,39 +130,89 @@ fn run_exec(argv: &[String]) -> PrivResponse {
     let args = &argv[1..];
 
     // Audit log to stderr (journald/supervisor will capture this)
-    eprintln!("privd exec: {:?}", argv);
+    eprintln!("privd exec: {argv:?}");
 
-    // Run the subprocess with cleared env and hard timeout
-    use std::process::Command;
+    let mut child = match Command::new(program)
+        .args(args)
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("privd exec io error: {e}");
+            return PrivResponse::Error { message: format!("io: {e}") };
+        }
+    };
 
-    let result = std::thread::scope(|s| {
-        s.spawn(|| {
-            Command::new(program)
-                .args(args)
-                .env_clear()
-                .output()
-        })
-        .join()
-    });
-
-    match result {
-        Ok(Ok(output)) => {
-            if output.status.success() {
-                eprintln!("privd exec ok: exit={}", output.status);
-                PrivResponse::Ok
-            } else {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                eprintln!("privd exec failed: exit={} stderr={}", output.status, stderr);
-                PrivResponse::Error {
-                    message: format!("exit {}: {}", output.status, stderr.trim()),
+    // Drain stderr fully on a helper thread (so a full pipe can never deadlock
+    // the wait loop) while KEEPING only a bounded prefix (so a chatty child
+    // can't exhaust memory or bloat the response).
+    let stderr_pipe = child.stderr.take();
+    let stderr_reader = std::thread::spawn(move || {
+        let cap = MAX_STDERR_CAPTURE;
+        let mut kept: Vec<u8> = Vec::new();
+        if let Some(mut pipe) = stderr_pipe {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if kept.len() < cap {
+                            let room = cap - kept.len();
+                            kept.extend_from_slice(&chunk[..n.min(room)]);
+                        }
+                        // Bytes beyond the cap are read and discarded to keep
+                        // the pipe drained.
+                    }
+                    Err(_) => break,
                 }
             }
         }
-        Ok(Err(e)) => {
-            eprintln!("privd exec io error: {e}");
-            PrivResponse::Error { message: format!("io: {e}") }
+        kept
+    });
+
+    // Poll for completion until the hard deadline; kill on timeout.
+    let deadline = Instant::now() + EXEC_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    eprintln!("privd exec timeout after {EXEC_TIMEOUT:?}: killing child");
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => {
+                eprintln!("privd exec wait error: {e}");
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stderr_reader.join();
+                return PrivResponse::Error { message: format!("wait: {e}") };
+            }
         }
-        Err(_) => PrivResponse::Error { message: "exec thread panicked".into() },
+    };
+
+    let stderr_bytes = stderr_reader.join().unwrap_or_default();
+    let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+    match status {
+        Some(status) if status.success() => {
+            eprintln!("privd exec ok: exit={status}");
+            PrivResponse::Ok
+        }
+        Some(status) => {
+            eprintln!("privd exec failed: exit={status}");
+            PrivResponse::Error {
+                message: format!("exit {}: {}", status, clip(stderr.trim(), 512)),
+            }
+        }
+        None => PrivResponse::Error { message: "operation timed out".into() },
     }
 }
 
