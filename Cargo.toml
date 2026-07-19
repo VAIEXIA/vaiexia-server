@@ -15,4 +15,6 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 figment = { version = "0.10", features = ["toml", "env"] }
+async-trait = "0.1"
+base64 = "0.22"
 vaiexia-core = { path = "../vaiexia-core", features = ["server-http"] }

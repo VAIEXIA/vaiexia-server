@@ -21,6 +21,8 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 figment = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
 vaiexia-core = { workspace = true }
 vaiexia-priv-proto = { path = "../vaiexia-priv-proto" }
 
