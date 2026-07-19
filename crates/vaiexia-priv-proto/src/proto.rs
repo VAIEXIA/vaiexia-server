@@ -75,6 +75,23 @@ mod tests {
     }
 
     #[test]
+    fn pkg_install_frame_with_malicious_name_rejected() {
+        // A hostile RPC peer crafts a frame whose `name` would be a flag/injection
+        // if it slipped past validation. Deserialization of the whole request must
+        // fail — the newtype's custom Deserialize is the gate.
+        for bad in [
+            r#"{"verb":"pkg_install","name":"-rf"}"#,
+            r#"{"verb":"pkg_install","name":"--config=/etc/evil"}"#,
+            r#"{"verb":"pkg_remove","name":"foo;reboot"}"#,
+            r#"{"verb":"pkg_install","name":"../../etc/passwd"}"#,
+            r#"{"verb":"pkg_install","name":""}"#,
+        ] {
+            let r: Result<PrivRequest, _> = serde_json::from_str(bad);
+            assert!(r.is_err(), "malicious frame must be rejected: {bad}");
+        }
+    }
+
+    #[test]
     fn pkg_refresh_index_roundtrip() {
         let req = PrivRequest::PkgRefreshIndex;
         let s = serde_json::to_string(&req).unwrap();
