@@ -139,15 +139,25 @@ impl Verifier for DaemonVerifier {
     fn verify_topic(&self, cap: Option<&Capability>, topic: &Topic) -> Result<Subject> {
         let subject = self.authenticate(cap)?;
 
-        if let Some(required_scope) = topic_scope(topic)
-            && !subject.scopes.contains(&required_scope)
-        {
+        // Fail closed: a topic with no policy entry is FORBIDDEN, not allowed.
+        // (Prevents a future event source added without a scope from becoming
+        // world-readable to any authenticated subject.)
+        let required_scope = match topic_scope(topic) {
+            Some(s) => s,
+            None => {
+                return Err(CoreError::Auth(Diagnostic::error(
+                    codes::FORBIDDEN,
+                    format!("no subscription policy for topic {}", topic.as_str()),
+                )));
+            }
+        };
+
+        if !subject.scopes.contains(&required_scope) {
             return Err(CoreError::Auth(Diagnostic::error(
                 codes::FORBIDDEN,
                 format!("missing scope {}", required_scope.as_str()),
             )));
         }
-        // Unknown topic (no scope requirement) — allow through.
 
         Ok(subject)
     }
@@ -333,6 +343,19 @@ mod tests {
         let topic = Topic::new("server.metrics");
         let subj = v.verify_topic(Some(&minted.capability), &topic).unwrap();
         assert!(subj.scopes.contains(&Scope::new("server.read")));
+    }
+
+    #[test]
+    fn verify_topic_unknown_topic_forbidden() {
+        // Even a fully-scoped subject must be denied a topic with no policy entry.
+        let (ctx, minted) = make_store(&["server.read", "server.logs.read"]);
+        let v = verifier(&ctx);
+        let topic = Topic::new("server.unmapped");
+        let err = v.verify_topic(Some(&minted.capability), &topic).unwrap_err();
+        match err {
+            CoreError::Auth(d) => assert_eq!(d.code, codes::FORBIDDEN),
+            _ => panic!("expected Auth FORBIDDEN error"),
+        }
     }
 
     #[test]
