@@ -1,5 +1,8 @@
 pub mod dto;
 pub mod server_host;
+pub mod server_logs;
+pub mod server_packages;
+pub mod server_services;
 
 use vaiexia_core::server::ServiceBuilder;
 
