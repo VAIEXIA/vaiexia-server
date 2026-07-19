@@ -1,0 +1,29 @@
+[package]
+name = "vaiexia-server"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "vaiexia_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vaiexia-server"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+figment = { workspace = true }
+vaiexia-core = { workspace = true }
+vaiexia-priv-proto = { path = "../vaiexia-priv-proto" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json"] }
