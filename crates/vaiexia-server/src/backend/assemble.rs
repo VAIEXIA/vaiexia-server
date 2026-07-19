@@ -111,13 +111,43 @@ fn assemble_linux_providers_auto() -> (
     Option<Arc<dyn crate::backend::PackageManager>>,
     Option<Arc<dyn crate::backend::LogProvider>>,
 ) {
-    // TODO(Part B): wire SystemdServices here when zbus backend is ready.
-    let services: Option<Arc<dyn crate::backend::ServiceManager>> = None;
+    // Part B: wire SystemdServices if the system D-Bus is reachable.
+    let services: Option<Arc<dyn crate::backend::ServiceManager>> =
+        probe_systemd_services_blocking();
     // TODO(Part C): wire JournaldLogs here when journald backend is ready.
     let logs: Option<Arc<dyn crate::backend::LogProvider>> = None;
     // TODO(Part C): wire real PackageManager here when package backend is ready.
     let packages: Option<Arc<dyn crate::backend::PackageManager>> = None;
     (services, packages, logs)
+}
+
+#[cfg(target_os = "linux")]
+fn probe_systemd_services_blocking() -> Option<Arc<dyn crate::backend::ServiceManager>> {
+    use crate::backend::systemd::SystemdServices;
+    // We need a short-lived tokio runtime to run the async probe + constructor.
+    // assemble() is called from a sync context (before the main runtime starts).
+    // If we are already inside an async context this would panic — guard against it.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+
+    rt.block_on(async {
+        if !SystemdServices::probe().await {
+            tracing::info!("assemble[auto/linux]: system D-Bus unreachable — services=None");
+            return None;
+        }
+        match SystemdServices::new().await {
+            Ok(svc) => {
+                tracing::info!("assemble[auto/linux]: SystemdServices wired");
+                Some(svc as Arc<dyn crate::backend::ServiceManager>)
+            }
+            Err(e) => {
+                tracing::warn!("assemble[auto/linux]: SystemdServices init failed: {e} — services=None");
+                None
+            }
+        }
+    })
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
