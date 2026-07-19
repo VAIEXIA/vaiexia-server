@@ -1,4 +1,5 @@
 pub mod dto;
+pub mod jobs;
 pub mod server_host;
 pub mod server_logs;
 pub mod server_module;
