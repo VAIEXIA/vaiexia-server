@@ -1,7 +1,5 @@
 use argon2::{
-    password_hash::{
-        rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-    },
+    password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Algorithm, Argon2, Params, Version,
 };
 
@@ -26,7 +24,11 @@ pub enum PasswordError {
 
 /// Hash a plaintext password, returning a PHC string (e.g. `$argon2id$...`).
 pub fn hash_password(password: &str) -> Result<String, PasswordError> {
-    let salt = SaltString::generate(&mut OsRng);
+    // Generate 16 random bytes via getrandom and encode as a SaltString.
+    let mut salt_bytes = [0u8; 16];
+    getrandom::getrandom(&mut salt_bytes).expect("os rng");
+    let salt = SaltString::encode_b64(&salt_bytes)
+        .map_err(|e| PasswordError::Hash(e.to_string()))?;
     let hash = argon2()
         .hash_password(password.as_bytes(), &salt)
         .map_err(|e| PasswordError::Hash(e.to_string()))?;
@@ -80,13 +82,13 @@ mod tests {
     #[test]
     fn verify_correct_password_returns_true() {
         let phc = hash_password("hunter2").unwrap();
-        assert_eq!(verify_password("hunter2", &phc).unwrap(), true);
+        assert!(verify_password("hunter2", &phc).unwrap());
     }
 
     #[test]
     fn verify_wrong_password_returns_false() {
         let phc = hash_password("hunter2").unwrap();
-        assert_eq!(verify_password("wrongpassword", &phc).unwrap(), false);
+        assert!(!verify_password("wrongpassword", &phc).unwrap());
     }
 
     #[test]
@@ -106,10 +108,12 @@ mod tests {
 
     #[test]
     fn needs_rehash_true_for_different_params() {
-        // Construct a PHC with different memory cost
+        // Construct a PHC with different memory cost (lower than current)
         let old_params = Params::new(8192, 1, 1, None).unwrap();
         let old_argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, old_params);
-        let salt = argon2::password_hash::SaltString::generate(&mut OsRng);
+        let mut salt_bytes = [0u8; 16];
+        getrandom::getrandom(&mut salt_bytes).unwrap();
+        let salt = argon2::password_hash::SaltString::encode_b64(&salt_bytes).unwrap();
         let old_phc = old_argon2
             .hash_password(b"password", &salt)
             .unwrap()
