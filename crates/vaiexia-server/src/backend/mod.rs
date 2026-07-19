@@ -1,9 +1,11 @@
 pub mod error;
 pub mod mock;
 pub mod types;
+pub mod unit_name;
 
 pub use error::BackendError;
 pub use types::{BackendCapabilities, HostInfo};
+pub use unit_name::UnitName;
 
 pub trait HostInfoProvider: Send + Sync {
     fn host_info(&self) -> Result<HostInfo, BackendError>;
