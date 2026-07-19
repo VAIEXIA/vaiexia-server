@@ -1,5 +1,6 @@
 use vaiexia_priv_proto::{PrivRequest, PrivResponse, PROTO_VERSION};
 
+#[allow(dead_code)]
 pub fn handle(req: &PrivRequest) -> PrivResponse {
     match req {
         PrivRequest::Ping => PrivResponse::Pong,

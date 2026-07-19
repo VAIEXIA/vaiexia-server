@@ -2425,6 +2425,8 @@ dependencies = [
 name = "vaiexia-privd"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "serde_json",
  "thiserror 2.0.19",
  "vaiexia-priv-proto",
 ]

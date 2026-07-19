@@ -8,6 +8,11 @@ license.workspace = true
 [dependencies]
 vaiexia-priv-proto = { path = "../vaiexia-priv-proto" }
 thiserror = { workspace = true }
+serde_json = { workspace = true }
+
+# libc for SO_PEERCRED (unix/linux only — tiny, no transitive deps beyond libc)
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
 
 [[bin]]
 name = "vaiexia-privd"
