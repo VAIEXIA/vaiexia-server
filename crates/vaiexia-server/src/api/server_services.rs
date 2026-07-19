@@ -6,7 +6,7 @@ use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 
 use crate::api::dto::{PageDto, UnitDetailDto, UnitDto};
-use crate::backend::{ServiceManager, ServiceState, SystemBackend, UnitName};
+use crate::backend::{ServiceState, SystemBackend, UnitName};
 use crate::diag::{backend_error_to_diagnostic, domain_codes};
 
 const MUTATION_TIMEOUT_SECS: u64 = 30;
