@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ── hex_bytes serde helper ────────────────────────────────────────────────────
@@ -110,6 +110,10 @@ pub enum StoreError {
 pub struct FileStore {
     path: PathBuf,
     snap: Arc<ArcSwap<IdentitySnapshot>>,
+    /// Serializes read-modify-write mutations so concurrent mutators cannot
+    /// clobber each other (e.g. a `touch_last_used` racing a `revoke_capability`
+    /// and silently un-revoking a token). Reads via `snapshot()` stay lock-free.
+    write_lock: Mutex<()>,
 }
 
 impl FileStore {
@@ -126,6 +130,7 @@ impl FileStore {
         Ok(Self {
             path,
             snap: Arc::new(ArcSwap::from_pointee(snap)),
+            write_lock: Mutex::new(()),
         })
     }
 
@@ -133,10 +138,22 @@ impl FileStore {
         write_atomic(&self.path, snap)
     }
 
-    fn mutate(&self, f: impl FnOnce(&mut IdentitySnapshot)) -> Result<(), StoreError> {
+    /// Read-modify-write against the current snapshot, persist, then publish.
+    ///
+    /// The whole cycle is serialized by `write_lock`, so two concurrent
+    /// mutations can never both branch off the same base snapshot and drop one
+    /// another's change (lost-update). `f` may signal failure by returning
+    /// `Err`, in which case neither disk nor the in-memory snapshot is touched.
+    fn mutate<F>(&self, f: F) -> Result<(), StoreError>
+    where
+        F: FnOnce(&mut IdentitySnapshot) -> Result<(), StoreError>,
+    {
+        // Held across load→apply→persist→store to serialize writers. Recover
+        // from a poisoned lock rather than propagating the panic.
+        let _guard = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let current = self.snap.load_full();
         let mut next = (*current).clone();
-        f(&mut next);
+        f(&mut next)?;
         let next = Arc::new(next);
         self.persist(&next)?;
         self.snap.store(next);
@@ -152,14 +169,19 @@ impl IdentityStore for FileStore {
     fn add_capability(&self, record: CapabilityRecord) -> Result<(), StoreError> {
         self.mutate(|s| {
             s.capabilities.insert(record.key_id.clone(), record);
+            Ok(())
         })
     }
 
     fn revoke_capability(&self, key_id: &str) -> Result<(), StoreError> {
-        self.mutate(|s| {
-            if let Some(rec) = s.capabilities.get_mut(key_id) {
+        self.mutate(|s| match s.capabilities.get_mut(key_id) {
+            Some(rec) => {
                 rec.revoked = true;
+                Ok(())
             }
+            // Fail closed & honest: revoking an unknown key is NOT a silent
+            // success (the handler maps this to NOT_FOUND).
+            None => Err(StoreError::NotFound(key_id.to_string())),
         })
     }
 
@@ -172,12 +194,14 @@ impl IdentityStore for FileStore {
             if let Some(rec) = s.capabilities.get_mut(key_id) {
                 rec.last_used = Some(now);
             }
+            Ok(())
         })
     }
 
     fn add_account(&self, record: AccountRecord) -> Result<(), StoreError> {
         self.mutate(|s| {
             s.accounts.insert(record.name.clone(), record);
+            Ok(())
         })
     }
 
@@ -372,6 +396,86 @@ mod tests {
         let snap = store.snapshot();
         let rec = snap.lookup_capability("aaaaaaaaaaaaaabb").unwrap();
         assert!(rec.last_used.is_some());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn revoke_unknown_key_returns_not_found() {
+        let path = temp_path();
+        let store = FileStore::open(&path).unwrap();
+        let err = store.revoke_capability("nope").unwrap_err();
+        assert!(matches!(err, StoreError::NotFound(_)));
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Concurrent mutations must not drop one another (lost-update).
+    ///
+    /// Without serialization of the read-modify-write cycle, many of these
+    /// distinct inserts would branch off the same base snapshot and clobber
+    /// each other, leaving far fewer than `N` capabilities behind.
+    #[test]
+    fn concurrent_add_capability_no_lost_updates() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let path = temp_path();
+        let store = Arc::new(FileStore::open(&path).unwrap());
+        const N: usize = 64;
+        let mut handles = Vec::new();
+        for i in 0..N {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                // 16-char base32-ish unique key_id.
+                let key = format!("k{i:015}");
+                store.add_capability(make_cap_record(&key)).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let snap = store.snapshot();
+        assert_eq!(
+            snap.capabilities.len(),
+            N,
+            "every concurrent add_capability must survive (no lost updates)"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A `touch_last_used` racing a `revoke_capability` must never un-revoke.
+    #[test]
+    fn concurrent_touch_does_not_clobber_revoke() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let path = temp_path();
+        let store = Arc::new(FileStore::open(&path).unwrap());
+        store.add_capability(make_cap_record("aaaaaaaaaaaaaabb")).unwrap();
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                for _ in 0..50 {
+                    let _ = store.touch_last_used("aaaaaaaaaaaaaabb");
+                }
+            }));
+        }
+        // Revoke concurrently with the touch storm.
+        {
+            let store = Arc::clone(&store);
+            handles.push(thread::spawn(move || {
+                store.revoke_capability("aaaaaaaaaaaaaabb").unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        let snap = store.snapshot();
+        assert!(
+            snap.lookup_capability("aaaaaaaaaaaaaabb").unwrap().revoked,
+            "revoke must survive concurrent touch_last_used"
+        );
         let _ = fs::remove_file(&path);
     }
 
