@@ -56,13 +56,13 @@ mod tests {
         let id = registry.try_start("install", async { Ok(()) }).unwrap();
         // Wait for completion
         for _ in 0..50 {
-            if let Some(status) = registry.status(&id) {
-                if matches!(status.state, crate::api::jobs::JobState::Succeeded) {
-                    let params = JobsStatusParams { job_id: id.clone() };
-                    let result = jobs_status_result(&registry, params).unwrap();
-                    assert_eq!(result.id, id);
-                    return;
-                }
+            if let Some(status) = registry.status(&id)
+                && matches!(status.state, crate::api::jobs::JobState::Succeeded)
+            {
+                let params = JobsStatusParams { job_id: id.clone() };
+                let result = jobs_status_result(&registry, params).unwrap();
+                assert_eq!(result.id, id);
+                return;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
         }

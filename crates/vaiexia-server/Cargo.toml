@@ -30,3 +30,5 @@ uuid = { workspace = true }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }
+vaiexia-core = { workspace = true, features = ["ws"] }
+futures = "0.3"

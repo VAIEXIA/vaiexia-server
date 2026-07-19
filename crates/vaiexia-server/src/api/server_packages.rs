@@ -178,10 +178,10 @@ mod tests {
         assert!(!dto.job_id.is_empty());
         // Poll until job succeeds
         for _ in 0..50 {
-            if let Some(status) = registry.status(&dto.job_id) {
-                if matches!(status.state, crate::api::jobs::JobState::Succeeded) {
-                    return;
-                }
+            if let Some(status) = registry.status(&dto.job_id)
+                && matches!(status.state, crate::api::jobs::JobState::Succeeded)
+            {
+                return;
             }
             tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
         }

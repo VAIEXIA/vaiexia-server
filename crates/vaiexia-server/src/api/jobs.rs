@@ -51,11 +51,11 @@ impl RegistryInner {
 
     fn store_terminal(&mut self, status: JobStatus) {
         // Evict oldest if at capacity
-        if self.recent_order.len() >= RECENT_JOBS_CAPACITY {
-            if let Some(evicted) = self.recent_order.first().cloned() {
-                self.recent.remove(&evicted);
-                self.recent_order.remove(0);
-            }
+        if self.recent_order.len() >= RECENT_JOBS_CAPACITY
+            && let Some(evicted) = self.recent_order.first().cloned()
+        {
+            self.recent.remove(&evicted);
+            self.recent_order.remove(0);
         }
         self.recent_order.push(status.id.clone());
         self.recent.insert(status.id.clone(), status);
@@ -174,10 +174,10 @@ mod tests {
         let id = registry.try_start("install", async { Ok(()) }).unwrap();
         // Poll until done
         for _ in 0..50 {
-            if let Some(status) = registry.status(&id) {
-                if matches!(status.state, JobState::Succeeded) {
-                    return;
-                }
+            if let Some(status) = registry.status(&id)
+                && matches!(status.state, JobState::Succeeded)
+            {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
@@ -215,10 +215,10 @@ mod tests {
             Err(vaiexia_core::diagnostic::Diagnostic::error("TEST_ERR", "boom"))
         }).unwrap();
         for _ in 0..50 {
-            if let Some(status) = registry.status(&id) {
-                if matches!(&status.state, JobState::Failed { .. }) {
-                    return;
-                }
+            if let Some(status) = registry.status(&id)
+                && matches!(&status.state, JobState::Failed { .. })
+            {
+                return;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
