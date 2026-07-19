@@ -45,7 +45,7 @@ async fn rpc(
         version: ProtoVersion::CURRENT,
         method: Method::new(method).unwrap(),
         params,
-        capability: cap.map(|s| vaiexia_core::auth::Capability::new(s)),
+        capability: cap.map(vaiexia_core::auth::Capability::new),
     };
     client
         .post(format!("{}/rpc", base_url))

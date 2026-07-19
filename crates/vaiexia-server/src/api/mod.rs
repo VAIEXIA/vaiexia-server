@@ -56,13 +56,12 @@ where
         let handler = Arc::clone(&handler);
         let scope = scope.clone();
         async move {
-            if let Some(s) = &scope {
-                if !subject.scopes.contains(s) {
-                    return Err(Diagnostic::error(
-                        codes::FORBIDDEN,
-                        format!("missing scope {}", s.as_str()),
-                    ));
-                }
+            if scope.as_ref().is_some_and(|s| !subject.scopes.contains(s)) {
+                let s = scope.as_ref().unwrap();
+                return Err(Diagnostic::error(
+                    codes::FORBIDDEN,
+                    format!("missing scope {}", s.as_str()),
+                ));
             }
             handler(params, subject).await
         }

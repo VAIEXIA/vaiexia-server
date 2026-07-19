@@ -83,13 +83,11 @@ impl DaemonVerifier {
         }
 
         // Expiry check.
-        if let Some(exp) = rec.expires_at {
-            if now_secs() >= exp {
-                return Err(CoreError::Auth(Diagnostic::error(
-                    codes::UNAUTHENTICATED,
-                    "capability has expired",
-                )));
-            }
+        if rec.expires_at.is_some_and(|exp| now_secs() >= exp) {
+            return Err(CoreError::Auth(Diagnostic::error(
+                codes::UNAUTHENTICATED,
+                "capability has expired",
+            )));
         }
 
         // Build subject.  Encode key_id so whoami can look up expires_at.
@@ -141,13 +139,13 @@ impl Verifier for DaemonVerifier {
     fn verify_topic(&self, cap: Option<&Capability>, topic: &Topic) -> Result<Subject> {
         let subject = self.authenticate(cap)?;
 
-        if let Some(required_scope) = topic_scope(topic) {
-            if !subject.scopes.contains(&required_scope) {
-                return Err(CoreError::Auth(Diagnostic::error(
-                    codes::FORBIDDEN,
-                    format!("missing scope {}", required_scope.as_str()),
-                )));
-            }
+        if let Some(required_scope) = topic_scope(topic)
+            && !subject.scopes.contains(&required_scope)
+        {
+            return Err(CoreError::Auth(Diagnostic::error(
+                codes::FORBIDDEN,
+                format!("missing scope {}", required_scope.as_str()),
+            )));
         }
         // Unknown topic (no scope requirement) — allow through.
 
