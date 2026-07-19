@@ -32,13 +32,12 @@ pub async fn shutdown_signal() {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use crate::backend::{HostInfoProvider, mock::MockBackend, SystemBackend};
+    use crate::backend::{mock::MockBackend, SystemBackend};
 
     #[test]
     fn build_service_assembles_without_panic() {
         let mock = Arc::new(MockBackend::new());
-        let caps = mock.capabilities();
-        let backend = Arc::new(SystemBackend { host: mock, caps });
+        let backend = Arc::new(SystemBackend::from_mock(mock));
         // Should not panic
         let _service = build_service(backend);
     }

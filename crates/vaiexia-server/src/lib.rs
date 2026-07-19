@@ -7,7 +7,7 @@ pub mod lifecycle;
 pub mod transport;
 
 use std::sync::Arc;
-use crate::backend::{HostInfoProvider, SystemBackend, mock::MockBackend};
+use crate::backend::{SystemBackend, mock::MockBackend};
 
 pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -21,10 +21,9 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
         tracing::warn!("config: {w}");
     }
 
-    // Step 0 backend = mock (real sysinfo/systemd = Step 3).
+    // Step 0/1 backend = mock (real sysinfo/systemd = Step 3).
     let mock = Arc::new(MockBackend::new());
-    let caps = mock.capabilities();
-    let backend = Arc::new(SystemBackend { host: mock, caps });
+    let backend = Arc::new(SystemBackend::from_mock(mock));
 
     let service = lifecycle::build_service(backend);
     let handles = transport::start_listeners(&cfg, service).await?;

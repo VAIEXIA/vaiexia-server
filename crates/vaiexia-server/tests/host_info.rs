@@ -4,7 +4,7 @@ use std::sync::Arc;
 use vaiexia_core::protocol::{Method, Request, RequestId, Response, ServerHello};
 use vaiexia_core::version::ProtoVersion;
 use vaiexia_server::{
-    backend::{HostInfoProvider, SystemBackend, mock::MockBackend},
+    backend::{SystemBackend, mock::MockBackend},
     config::{Listener, ListenerKind, ServerConfig},
     lifecycle::build_service,
     transport::start_listeners,
@@ -24,8 +24,7 @@ fn make_config(bind: &str) -> ServerConfig {
 
 fn make_backend() -> Arc<SystemBackend> {
     let mock = Arc::new(MockBackend::new());
-    let caps = mock.capabilities();
-    Arc::new(SystemBackend { host: mock, caps })
+    Arc::new(SystemBackend::from_mock(mock))
 }
 
 #[tokio::test(flavor = "multi_thread")]

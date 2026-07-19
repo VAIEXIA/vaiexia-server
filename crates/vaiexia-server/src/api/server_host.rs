@@ -28,12 +28,11 @@ pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>) -> ServiceBuild
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use crate::backend::{BackendError, HostInfoProvider, mock::MockBackend, SystemBackend};
+    use crate::backend::{BackendError, mock::MockBackend, SystemBackend};
 
     fn make_backend() -> Arc<SystemBackend> {
         let mock = Arc::new(MockBackend::new());
-        let caps = mock.capabilities();
-        Arc::new(SystemBackend { host: mock, caps })
+        Arc::new(SystemBackend::from_mock(mock))
     }
 
     #[test]
@@ -48,8 +47,7 @@ mod tests {
     fn host_info_result_with_unavailable_returns_backend_unavailable() {
         let mock = Arc::new(MockBackend::new());
         mock.set_fail_next(BackendError::Unavailable);
-        let caps = mock.capabilities();
-        let be = Arc::new(SystemBackend { host: mock, caps });
+        let be = Arc::new(SystemBackend::from_mock(mock));
         let err = host_info_result(&be).unwrap_err();
         assert_eq!(err.code, "BACKEND_UNAVAILABLE");
     }
