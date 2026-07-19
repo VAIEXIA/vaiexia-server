@@ -34,6 +34,14 @@ vaiexia-priv-proto = { path = "../vaiexia-priv-proto" }
 uuid = { workspace = true }
 sysinfo = { workspace = true }
 
+# zbus is only linked on Linux (the systemd module is cfg-gated)
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { workspace = true }
+futures-util = "0.3"
+
+[features]
+system-it = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", features = ["json"] }

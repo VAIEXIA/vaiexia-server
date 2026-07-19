@@ -3,6 +3,7 @@ pub mod error;
 pub mod metrics;
 pub mod mock;
 pub mod probe;
+pub mod systemd;
 pub mod types;
 pub mod unit_name;
 
