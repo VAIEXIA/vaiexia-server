@@ -114,10 +114,14 @@ fn assemble_linux_providers_auto() -> (
     // Part B: wire SystemdServices if the system D-Bus is reachable.
     let services: Option<Arc<dyn crate::backend::ServiceManager>> =
         probe_systemd_services_blocking();
-    // TODO(Part C): wire JournaldLogs here when journald backend is ready.
-    let logs: Option<Arc<dyn crate::backend::LogProvider>> = None;
-    // TODO(Part C): wire real PackageManager here when package backend is ready.
-    let packages: Option<Arc<dyn crate::backend::PackageManager>> = None;
+
+    // Part C: wire JournaldLogs if journalctl is reachable.
+    let logs: Option<Arc<dyn crate::backend::LogProvider>> = probe_journald_logs_blocking();
+
+    // Part C: wire real PackageManager if detected and privd socket reachable.
+    let packages: Option<Arc<dyn crate::backend::PackageManager>> =
+        probe_packages_blocking();
+
     (services, packages, logs)
 }
 
@@ -148,6 +152,62 @@ fn probe_systemd_services_blocking() -> Option<Arc<dyn crate::backend::ServiceMa
             }
         }
     })
+}
+
+// ── Journald probe ────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn probe_journald_logs_blocking() -> Option<Arc<dyn crate::backend::LogProvider>> {
+    use crate::backend::logs::JournaldLogs;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+
+    rt.block_on(async {
+        if !JournaldLogs::probe().await {
+            tracing::info!("assemble[auto/linux]: journalctl unreachable — logs=None");
+            return None;
+        }
+        let logs = JournaldLogs::new();
+        tracing::info!("assemble[auto/linux]: JournaldLogs wired");
+        Some(Arc::new(logs) as Arc<dyn crate::backend::LogProvider>)
+    })
+}
+
+// ── Package manager probe ─────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn probe_packages_blocking() -> Option<Arc<dyn crate::backend::PackageManager>> {
+    use crate::backend::packages::{
+        detect::{from_os_release, confirm, binary_path},
+        real::RealPackageManager,
+    };
+
+    // Detect from /etc/os-release
+    let os_release = std::fs::read_to_string("/etc/os-release").ok()?;
+    let kind = from_os_release(&os_release)?;
+
+    // Confirm the binary is present
+    if !confirm(kind, |p| p.exists()) {
+        tracing::info!(
+            "assemble[auto/linux]: package manager binary missing for {kind:?} — packages=None"
+        );
+        return None;
+    }
+
+    // Check if privd socket is reachable (just a filesystem check for now)
+    let socket_path = crate::backend::packages::privd_client::PRIVD_SOCKET_PATH;
+    if !std::path::Path::new(socket_path).exists() {
+        tracing::info!(
+            "assemble[auto/linux]: privd socket {socket_path} absent — packages=None"
+        );
+        return None;
+    }
+
+    tracing::info!("assemble[auto/linux]: RealPackageManager({kind:?}) wired");
+    Some(Arc::new(RealPackageManager::new(kind)) as Arc<dyn crate::backend::PackageManager>)
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

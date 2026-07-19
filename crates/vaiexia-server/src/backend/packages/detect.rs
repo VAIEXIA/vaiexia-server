@@ -41,7 +41,7 @@ pub fn from_os_release(content: &str) -> Option<PackageKind> {
     }
 
     // Check primary ID first, then fallback to ID_LIKE
-    if let Some(kind) = id.and_then(|s| kind_from_id(s)) {
+    if let Some(kind) = id.and_then(kind_from_id) {
         return Some(kind);
     }
     // ID_LIKE may be space-separated list of distros
