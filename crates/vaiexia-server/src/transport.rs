@@ -71,18 +71,15 @@ pub async fn start_listeners(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use crate::auth::SkeletonVerifier;
     use crate::backend::{SystemBackend, mock::MockBackend};
     use crate::config::{Listener, ListenerKind, ServerConfig};
-    use vaiexia_core::server::ServiceBuilder;
+    use crate::lifecycle::build_service;
     use std::path::PathBuf;
 
     fn make_service() -> Arc<Service> {
         let mock = Arc::new(MockBackend::new());
         let backend = Arc::new(SystemBackend::from_mock(mock));
-        let builder = ServiceBuilder::new().verifier(SkeletonVerifier);
-        let builder = crate::api::server_host::register(builder, backend);
-        Arc::new(builder.build())
+        build_service(backend)
     }
 
     fn http_config(bind: &str) -> ServerConfig {

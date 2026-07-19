@@ -1,13 +1,16 @@
 use std::sync::Arc;
 use vaiexia_core::server::{Service, ServiceBuilder};
 
-use crate::api::server_host;
+use crate::api::{ApiModule, server_module::ServerModule};
 use crate::auth::SkeletonVerifier;
 use crate::backend::SystemBackend;
 
 pub fn build_service(backend: Arc<SystemBackend>) -> Arc<Service> {
     let builder = ServiceBuilder::new().verifier(SkeletonVerifier);
-    let builder = server_host::register(builder, backend);
+    let modules: Vec<Box<dyn ApiModule>> = vec![Box::new(ServerModule)];
+    let builder = modules
+        .into_iter()
+        .fold(builder, |b, m| m.register(b, Arc::clone(&backend)));
     Arc::new(builder.build())
 }
 
