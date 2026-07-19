@@ -360,10 +360,10 @@ async fn token_create(
 /// credential handle); the account identity lives on the capability record.
 /// Falls back to the raw subject id if the handle can't be resolved.
 fn resolve_owner_subject_id(subject: &Subject, store: &Arc<dyn IdentityStore>) -> String {
-    if let Some(key_id) = subject.id.as_str().strip_prefix("cap:") {
-        if let Some(rec) = store.snapshot().lookup_capability(key_id) {
-            return rec.subject_id.clone();
-        }
+    if let Some(key_id) = subject.id.as_str().strip_prefix("cap:")
+        && let Some(rec) = store.snapshot().lookup_capability(key_id)
+    {
+        return rec.subject_id.clone();
     }
     subject.id.as_str().to_string()
 }
