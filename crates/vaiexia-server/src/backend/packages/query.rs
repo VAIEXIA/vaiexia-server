@@ -41,6 +41,9 @@ fn build_apt_list_argv(query: Option<&str>, installed_only: bool) -> Vec<String>
             "-f=${Package}\\t${Version}\\t${Status}\\t${binary:Summary}\\n".to_string(),
         ];
         if let Some(q) = query {
+            // `--` guard: the search term is attacker-influenced; keep it an
+            // operand, never an option (e.g. `-o`/`--admindir`).
+            args.push("--".to_string());
             args.push(format!("*{}*", q));
         }
         args
@@ -50,6 +53,7 @@ fn build_apt_list_argv(query: Option<&str>, installed_only: bool) -> Vec<String>
             "/usr/bin/apt-cache".to_string(),
             "search".to_string(),
             "--names-only".to_string(),
+            "--".to_string(),
         ];
         if let Some(q) = query {
             args.push(q.to_string());
@@ -70,6 +74,8 @@ fn build_dnf_list_argv(query: Option<&str>, installed_only: bool) -> Vec<String>
         args.push("--installed".to_string());
     }
     if let Some(q) = query {
+        // `--` guard before the attacker-influenced search term.
+        args.push("--".to_string());
         args.push(q.to_string());
     }
     args
@@ -83,6 +89,7 @@ fn build_pacman_list_argv(query: Option<&str>, installed_only: bool) -> Vec<Stri
             "-Q".to_string(),
         ];
         if let Some(q) = query {
+            args.push("--".to_string());
             args.push(q.to_string());
         }
         args
@@ -93,6 +100,7 @@ fn build_pacman_list_argv(query: Option<&str>, installed_only: bool) -> Vec<Stri
             "-Ss".to_string(),
         ];
         if let Some(q) = query {
+            args.push("--".to_string());
             args.push(q.to_string());
         }
         args
@@ -108,6 +116,7 @@ fn build_apk_list_argv(query: Option<&str>, installed_only: bool) -> Vec<String>
         args.push("--installed".to_string());
     }
     if let Some(q) = query {
+        args.push("--".to_string());
         args.push(q.to_string());
     }
     args
@@ -293,6 +302,34 @@ mod tests {
         let args = build_list_argv(PackageKind::Apk, None, true);
         assert_eq!(args[0], "/sbin/apk");
         assert!(args.contains(&"--installed".to_string()));
+    }
+
+    #[test]
+    fn search_query_is_operand_not_option() {
+        // A hostile search term that looks like an option must land AFTER a
+        // `--` end-of-options guard so the manager treats it as a plain operand.
+        let injection = "--config=/etc/evil";
+        for (kind, installed_only) in [
+            (PackageKind::Apt, false),
+            (PackageKind::Apt, true),
+            (PackageKind::Dnf, true),
+            (PackageKind::Pacman, false),
+            (PackageKind::Pacman, true),
+            (PackageKind::Apk, true),
+        ] {
+            let args = build_list_argv(kind, Some(injection), installed_only);
+            let dd = args.iter().position(|a| a == "--");
+            let inj = args.iter().position(|a| a.contains(injection));
+            match (dd, inj) {
+                (Some(d), Some(i)) => assert!(
+                    d < i,
+                    "{kind:?} (installed={installed_only}): `--` must precede the query: {args:?}"
+                ),
+                _ => panic!(
+                    "{kind:?} (installed={installed_only}): expected both `--` guard and query term: {args:?}"
+                ),
+            }
+        }
     }
 
     #[test]
