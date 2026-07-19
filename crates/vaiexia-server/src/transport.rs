@@ -79,7 +79,10 @@ mod tests {
     fn make_service() -> Arc<Service> {
         let mock = Arc::new(MockBackend::new());
         let backend = Arc::new(SystemBackend::from_mock(mock));
-        build_service(backend)
+        let (service, handles) = build_service(backend);
+        // Abort pump handles — transport test doesn't need them
+        for h in handles { h.abort(); }
+        service
     }
 
     fn http_config(bind: &str) -> ServerConfig {

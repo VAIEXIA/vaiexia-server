@@ -47,7 +47,7 @@ async fn rpc(client: &reqwest::Client, base_url: &str, method: &str, params: ser
 #[tokio::test(flavor = "multi_thread")]
 async fn read_surface_contract() {
     let backend = make_backend();
-    let service = build_service(backend);
+    let (service, pump_handles) = build_service(backend);
     let cfg = make_config("127.0.0.1:0");
     let handles = start_listeners(&cfg, service).await.unwrap();
     let addr = handles[0].local_addr();
@@ -111,5 +111,6 @@ async fn read_surface_contract() {
         assert!(!e["cursor"].as_str().unwrap_or("").is_empty(), "entry should have cursor");
     }
 
+    pump_handles.into_iter().for_each(|h| h.abort());
     handles.into_iter().for_each(|h| h.shutdown());
 }

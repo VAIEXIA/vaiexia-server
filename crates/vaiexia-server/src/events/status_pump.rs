@@ -46,7 +46,7 @@ mod tests {
     use vaiexia_core::protocol::Event;
 
     use crate::backend::{mock::MockBackend, SystemBackend, ServiceManager};
-    use crate::events::{SeqCounter, topics};
+    use crate::events::topics;
 
     #[tokio::test]
     async fn status_pump_emits_event_when_service_changes() {

@@ -26,7 +26,7 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
     let mock = Arc::new(MockBackend::new());
     let backend = Arc::new(SystemBackend::from_mock(mock));
 
-    let service = lifecycle::build_service(backend);
+    let (service, pump_handles) = lifecycle::build_service(backend);
     let handles = transport::start_listeners(&cfg, service).await?;
     for h in &handles {
         tracing::info!("listening on {}", h.local_addr());
@@ -34,6 +34,9 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
 
     lifecycle::shutdown_signal().await;
     tracing::info!("shutting down");
+    for h in pump_handles {
+        h.abort();
+    }
     for h in handles {
         h.shutdown();
     }

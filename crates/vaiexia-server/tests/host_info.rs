@@ -31,7 +31,7 @@ fn make_backend() -> Arc<SystemBackend> {
 async fn host_info_and_hello_integration() {
     // 1. Build service and start listener on an ephemeral port.
     let backend = make_backend();
-    let service = build_service(backend);
+    let (service, pump_handles) = build_service(backend);
     let cfg = make_config("127.0.0.1:0");
     let handles = start_listeners(&cfg, service).await.unwrap();
     let addr = handles[0].local_addr();
@@ -75,5 +75,6 @@ async fn host_info_and_hello_integration() {
     assert_eq!(value["capabilities"]["metrics"], true);
 
     // 4. Shutdown and verify it completes cleanly.
+    pump_handles.into_iter().for_each(|h| h.abort());
     handles.into_iter().for_each(|h| h.shutdown());
 }

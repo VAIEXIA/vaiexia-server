@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use vaiexia_core::protocol::Event;
 
-use crate::api::jobs::{JobRegistry, JobStatus};
+use crate::api::jobs::JobRegistry;
 use crate::events::{SeqCounter, topics};
 
 pub async fn run(
