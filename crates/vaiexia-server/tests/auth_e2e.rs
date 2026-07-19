@@ -228,7 +228,11 @@ async fn auth_e2e_full_flow() {
     assert!(resp.is_ok(), "auth.whoami must succeed: {:?}", resp.outcome);
     let v = resp.value().unwrap();
     let whoami_subject = v["subject_id"].as_str().unwrap();
-    assert!(whoami_subject.starts_with("cap:"), "subject_id must be cap:<key_id>");
+    // whoami reports the stable account identity, not the "cap:<key_id>" handle.
+    assert_eq!(
+        whoami_subject, "user:admin",
+        "whoami must report the account subject_id, not the cap handle"
+    );
     let whoami_scopes = v["scopes"].as_array().unwrap();
     assert!(whoami_scopes.iter().any(|s| s == "auth.admin"), "admin cap must have auth.admin scope");
 

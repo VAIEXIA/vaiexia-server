@@ -282,20 +282,22 @@ async fn whoami(
     store: Arc<dyn IdentityStore>,
 ) -> Result<WhoamiResponse, Diagnostic> {
     // For capability-authenticated subjects (SubjectId = "cap:<key_id>"),
-    // look up the record to get scopes as strings and expires_at.
+    // look up the record to get the account identity, scopes, and expires_at.
+    // The response reports the *account* subject_id (stable across a subject's
+    // tokens), never the internal "cap:<key_id>" credential handle.
     let key_id_opt = subject.id.as_str().strip_prefix("cap:");
-    let (scopes, expires_at) = if let Some(key_id) = key_id_opt {
+    let (subject_id, scopes, expires_at) = if let Some(key_id) = key_id_opt {
         let snap = store.snapshot();
         match snap.lookup_capability(key_id) {
-            Some(r) => (r.scopes.clone(), r.expires_at),
-            None => (vec![], None),
+            Some(r) => (r.subject_id.clone(), r.scopes.clone(), r.expires_at),
+            None => (subject.id.as_str().to_string(), vec![], None),
         }
     } else {
-        (vec![], None)
+        (subject.id.as_str().to_string(), vec![], None)
     };
 
     Ok(WhoamiResponse {
-        subject_id: subject.id.as_str().to_string(),
+        subject_id,
         scopes,
         expires_at,
     })
@@ -311,9 +313,23 @@ async fn token_create(
         return Err(Diagnostic::error(codes::INVALID_PARAMS, "scopes must not be empty"));
     }
 
-    // Determine the subject_id for the new token.
-    // The caller's subject_id is used as the "owner" of the token.
-    let subject_id = subject.id.as_str().to_string();
+    // No privilege escalation: a caller may only mint tokens whose scopes are a
+    // subset of its own. Otherwise an `auth.admin`-scoped-but-otherwise-limited
+    // token could mint itself a broader capability (e.g. server.services.write).
+    if let Some(missing) = p.scopes.iter().find(|s| {
+        !subject
+            .scopes
+            .contains(&vaiexia_core::auth::Scope::new((*s).clone()))
+    }) {
+        return Err(Diagnostic::error(
+            codes::FORBIDDEN,
+            format!("cannot grant scope you do not hold: {missing}"),
+        ));
+    }
+
+    // Owner of the new token is the caller's *account* identity, resolved from
+    // the caller's capability record — not the raw "cap:<key_id>" handle.
+    let subject_id = resolve_owner_subject_id(&subject, &store);
 
     let expires_at = p.ttl.map(|ttl| now_secs() + ttl);
     let minted = token::mint();
@@ -336,6 +352,20 @@ async fn token_create(
         key_id: minted.key_id,
         scopes: p.scopes,
     })
+}
+
+/// Resolve the caller's stable account `subject_id`.
+///
+/// Capability subjects carry `SubjectId = "cap:<key_id>"` (an internal
+/// credential handle); the account identity lives on the capability record.
+/// Falls back to the raw subject id if the handle can't be resolved.
+fn resolve_owner_subject_id(subject: &Subject, store: &Arc<dyn IdentityStore>) -> String {
+    if let Some(key_id) = subject.id.as_str().strip_prefix("cap:") {
+        if let Some(rec) = store.snapshot().lookup_capability(key_id) {
+            return rec.subject_id.clone();
+        }
+    }
+    subject.id.as_str().to_string()
 }
 
 async fn token_list(store: Arc<dyn IdentityStore>) -> Result<Vec<TokenMetadata>, Diagnostic> {
@@ -465,7 +495,8 @@ mod tests {
         let store = make_store(&path);
         let subject = Subject {
             id: vaiexia_core::auth::SubjectId::new("cap:testkey"),
-            scopes: vaiexia_core::auth::ScopeSet::from_iter(["auth.admin"]),
+            // Caller must itself hold what it delegates (no escalation).
+            scopes: vaiexia_core::auth::ScopeSet::from_iter(["auth.admin", "server.read"]),
         };
         let params = TokenCreateParams {
             label: "test-token".into(),
@@ -475,6 +506,89 @@ mod tests {
         let resp = token_create(params, subject, Arc::clone(&store)).await.unwrap();
         assert!(!resp.capability.is_empty());
         assert_eq!(resp.scopes, vec!["server.read"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn whoami_reports_account_identity_not_cap_handle() {
+        let path = temp_path("whoami-id");
+        let store = make_store(&path);
+        let caller = token::mint();
+        store.add_capability(CapabilityRecord {
+            key_id: caller.key_id.clone(),
+            secret_hash: caller.secret_hash,
+            subject_id: "user:admin".into(),
+            scopes: vec!["auth.admin".into()],
+            label: "caller".into(),
+            created_at: now_secs(),
+            expires_at: Some(now_secs() + 3600),
+            revoked: false,
+            last_used: None,
+        }).unwrap();
+        let subject = Subject {
+            id: vaiexia_core::auth::SubjectId::new(format!("cap:{}", caller.key_id)),
+            scopes: vaiexia_core::auth::ScopeSet::from_iter(["auth.admin"]),
+        };
+        let resp = whoami(subject, Arc::clone(&store)).await.unwrap();
+        assert_eq!(resp.subject_id, "user:admin");
+        assert!(resp.expires_at.is_some(), "per-token expiry still surfaced");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn token_create_rejects_scopes_beyond_caller() {
+        let path = temp_path("token-escalate");
+        let store = make_store(&path);
+        // Caller holds ONLY auth.admin — not server.services.write.
+        let subject = Subject {
+            id: vaiexia_core::auth::SubjectId::new("cap:limitedadmin"),
+            scopes: vaiexia_core::auth::ScopeSet::from_iter(["auth.admin"]),
+        };
+        let params = TokenCreateParams {
+            label: "escalation".into(),
+            scopes: vec!["server.services.write".into()],
+            ttl: None,
+        };
+        let err = token_create(params, subject, Arc::clone(&store)).await.unwrap_err();
+        assert_eq!(err.code, codes::FORBIDDEN, "must not mint scope caller lacks");
+        // Nothing was persisted.
+        assert!(store.snapshot().capabilities.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn token_create_records_account_owner_not_cap_handle() {
+        let path = temp_path("token-owner");
+        let store = make_store(&path);
+        // Seed the caller's own capability so the "cap:<key_id>" handle resolves.
+        let caller = token::mint();
+        store.add_capability(CapabilityRecord {
+            key_id: caller.key_id.clone(),
+            secret_hash: caller.secret_hash,
+            subject_id: "user:alice".into(),
+            scopes: vec!["auth.admin".into(), "server.read".into()],
+            label: "caller".into(),
+            created_at: now_secs(),
+            expires_at: None,
+            revoked: false,
+            last_used: None,
+        }).unwrap();
+        let subject = Subject {
+            id: vaiexia_core::auth::SubjectId::new(format!("cap:{}", caller.key_id)),
+            scopes: vaiexia_core::auth::ScopeSet::from_iter(["auth.admin", "server.read"]),
+        };
+        let params = TokenCreateParams {
+            label: "delegated".into(),
+            scopes: vec!["server.read".into()],
+            ttl: None,
+        };
+        let resp = token_create(params, subject, Arc::clone(&store)).await.unwrap();
+        let snap = store.snapshot();
+        let rec = snap.lookup_capability(&resp.key_id).unwrap();
+        assert_eq!(
+            rec.subject_id, "user:alice",
+            "new token must record the caller's account identity, not the cap handle"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
