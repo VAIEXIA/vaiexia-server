@@ -1,7 +1,9 @@
 pub mod assemble;
 pub mod error;
+pub mod logs;
 pub mod metrics;
 pub mod mock;
+pub mod packages;
 pub mod probe;
 pub mod systemd;
 pub mod types;

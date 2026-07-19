@@ -4,6 +4,8 @@ pub enum BackendError {
     NotFound,
     #[error("invalid name")]
     InvalidName,
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
     #[error("unsupported")]
     Unsupported,
     #[error("backend unavailable")]
@@ -18,4 +20,6 @@ pub enum BackendError {
     Protocol,
     #[error("io error")]
     Io,
+    #[error("internal error: {0}")]
+    Internal(String),
 }

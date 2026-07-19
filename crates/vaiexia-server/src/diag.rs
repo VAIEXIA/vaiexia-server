@@ -22,7 +22,7 @@ pub fn backend_error_to_diagnostic(e: &BackendError) -> Diagnostic {
         Unavailable => Diagnostic::error(domain_codes::BACKEND_UNAVAILABLE, "backend unavailable"),
         Busy => Diagnostic::error(domain_codes::BUSY, "resource busy"),
         Timeout => Diagnostic::error(domain_codes::TIMEOUT, "operation timed out"),
-        Denied | Protocol | Io => Diagnostic::error(codes::INTERNAL, "internal error"),
+        Denied | Protocol | Io | Internal(_) | InvalidInput(_) => Diagnostic::error(codes::INTERNAL, "internal error"),
     }
 }
 
