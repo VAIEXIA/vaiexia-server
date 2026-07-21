@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
-use vaiexia_core::server::{serve, serve_tls, ServeHandle, Service, TlsServeHandle, TlsServerConfig};
+use vaiexia_core::server::{serve, ServeHandle, Service};
+#[cfg(feature = "tls")]
+use vaiexia_core::server::{serve_tls, TlsServeHandle, TlsServerConfig};
 
 use crate::config::{ListenerKind, ServerConfig};
 
@@ -18,6 +20,7 @@ pub enum TransportError {
 
 pub enum ListenerHandle {
     Http(ServeHandle),
+    #[cfg(feature = "tls")]
     Tls(TlsServeHandle),
 }
 
@@ -25,6 +28,7 @@ impl std::fmt::Debug for ListenerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ListenerHandle::Http(h) => write!(f, "ListenerHandle::Http(addr={})", h.addr()),
+            #[cfg(feature = "tls")]
             ListenerHandle::Tls(h) => write!(f, "ListenerHandle::Tls(addr={})", h.addr()),
         }
     }
@@ -34,6 +38,7 @@ impl ListenerHandle {
     pub fn local_addr(&self) -> SocketAddr {
         match self {
             ListenerHandle::Http(h) => h.addr(),
+            #[cfg(feature = "tls")]
             ListenerHandle::Tls(h) => h.addr(),
         }
     }
@@ -41,6 +46,7 @@ impl ListenerHandle {
     pub fn shutdown(self) {
         match self {
             ListenerHandle::Http(h) => h.shutdown(),
+            #[cfg(feature = "tls")]
             ListenerHandle::Tls(h) => h.shutdown(),
         }
     }
@@ -63,21 +69,32 @@ pub async fn start_listeners(
                 handles.push(ListenerHandle::Http(h));
             }
             ListenerKind::Https => {
-                let cert_path = l.cert.as_ref()
-                    .ok_or_else(|| TransportError::Tls("https listener missing cert path".into()))?;
-                let key_path = l.key.as_ref()
-                    .ok_or_else(|| TransportError::Tls("https listener missing key path".into()))?;
-                // Fail closed: unreadable/unparsable material aborts startup.
-                let cert_pem = std::fs::read(cert_path)
-                    .map_err(|e| TransportError::Tls(format!("read cert {}: {e}", cert_path.display())))?;
-                let key_pem = std::fs::read(key_path)
-                    .map_err(|e| TransportError::Tls(format!("read key {}: {e}", key_path.display())))?;
-                let tls = TlsServerConfig { cert_pem, key_pem, client_ca_pem: None };
-                let h = serve_tls(Arc::clone(&service), &l.bind, tls)
-                    .await
-                    .map_err(|e| TransportError::Tls(e.to_string()))?;
-                tracing::info!(bind = %l.bind, "tls listener started");
-                handles.push(ListenerHandle::Tls(h));
+                #[cfg(feature = "tls")]
+                {
+                    let cert_path = l.cert.as_ref()
+                        .ok_or_else(|| TransportError::Tls("https listener missing cert path".into()))?;
+                    let key_path = l.key.as_ref()
+                        .ok_or_else(|| TransportError::Tls("https listener missing key path".into()))?;
+                    // Fail closed: unreadable/unparsable material aborts startup.
+                    let cert_pem = std::fs::read(cert_path)
+                        .map_err(|e| TransportError::Tls(format!("read cert {}: {e}", cert_path.display())))?;
+                    let key_pem = std::fs::read(key_path)
+                        .map_err(|e| TransportError::Tls(format!("read key {}: {e}", key_path.display())))?;
+                    let tls = TlsServerConfig { cert_pem, key_pem, client_ca_pem: None };
+                    let h = serve_tls(Arc::clone(&service), &l.bind, tls)
+                        .await
+                        .map_err(|e| TransportError::Tls(e.to_string()))?;
+                    tracing::info!(bind = %l.bind, "tls listener started");
+                    handles.push(ListenerHandle::Tls(h));
+                }
+                #[cfg(not(feature = "tls"))]
+                {
+                    // Fail closed: an https listener was requested but this binary
+                    // was built without the `tls` feature (spec §5.3 opt-in).
+                    return Err(TransportError::Tls(
+                        "https listener requires building with the `tls` feature".into(),
+                    ));
+                }
             }
             ListenerKind::ObfsTcp | ListenerKind::ObfsUdp => {
                 return Err(TransportError::ObfsDeferred)
@@ -130,6 +147,7 @@ mod tests {
         handles.into_iter().for_each(|h| h.shutdown());
     }
 
+    #[cfg(feature = "tls")]
     #[tokio::test(flavor = "multi_thread")]
     async fn https_listener_serves_hello_with_tls_feature() {
         use std::io::Write;

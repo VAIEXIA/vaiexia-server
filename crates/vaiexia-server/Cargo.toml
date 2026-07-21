@@ -23,7 +23,7 @@ tracing-subscriber = { workspace = true }
 figment = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
-vaiexia-core = { workspace = true, features = ["server-tls"] }
+vaiexia-core = { workspace = true, features = ["server-http"] }
 blake3 = { workspace = true }
 subtle = { workspace = true }
 base32 = { workspace = true }
@@ -40,6 +40,11 @@ zbus = { workspace = true }
 futures-util = "0.3"
 
 [features]
+# TLS is enabled by default so the shipped binary supports the `https` listener
+# (spec §5.3 opt-in-at-runtime). Building `--no-default-features` drops rustls/ring
+# — used for the Windows-host Linux cross-check (ring needs a C cross-toolchain).
+default = ["tls"]
+tls = ["vaiexia-core/server-tls"]
 system-it = []
 
 [dev-dependencies]
