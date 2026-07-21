@@ -18,6 +18,13 @@ pub struct BackendCapabilities {
 
 // ── Service types ────────────────────────────────────────────────────────────
 
+/// Normalized service state — the platform-neutral projection every backend
+/// maps onto. This is an OPEN set for wire-contract purposes: clients MUST
+/// treat any unrecognized value as [`ServiceState::Unknown`] and never assume
+/// the variant list is exhaustive. A non-systemd backend (e.g. a future Windows
+/// SCM backend) maps its own states here — SCM `PAUSED` has no dedicated variant
+/// and lands on `Unknown` with the native detail carried in `sub_state`; SCM has
+/// no first-class `Failed` (approximated by stopped + nonzero exit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ServiceState {
@@ -33,8 +40,13 @@ pub enum ServiceState {
 pub struct UnitStatus {
     pub name: String,
     pub description: String,
+    /// Platform-native, free-form state detail — NOT a stable enum. On systemd
+    /// this is the unit load state (`loaded`/`not-found`/…); another backend
+    /// fills its own native vocabulary. Clients display it but must not branch on it.
     pub load_state: String,
     pub active_state: ServiceState,
+    /// Platform-native, free-form sub-state detail (systemd `running`/`dead`/…;
+    /// a Windows SCM backend would put `paused`/`start-pending`/… here). Display-only.
     pub sub_state: String,
 }
 
@@ -62,6 +74,8 @@ pub struct LogEntry {
     pub cursor: String,
     pub ts_us: u64,
     pub unit: Option<String>,
+    /// syslog severity scale 0–7 (0=emerg … 7=debug). Non-syslog sources map
+    /// onto it — e.g. a Windows Event Log backend maps Critical..Verbose here.
     pub priority: u8,
     pub message: String,
 }
@@ -82,6 +96,8 @@ pub struct MetricsSnapshot {
     pub cpu_pct: f32,
     pub mem_used: u64,
     pub mem_total: u64,
+    /// Unix load average (1/5/15 min). Reported as `0.0` on platforms without a
+    /// load-average concept (e.g. Windows) — treat `0.0` as "unavailable", not idle.
     pub load1: f32,
     pub load5: f32,
     pub load15: f32,
