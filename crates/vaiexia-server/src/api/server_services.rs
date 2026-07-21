@@ -42,10 +42,22 @@ pub struct ServiceOutcomeDto {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
+/// Upper bound on the `name_glob` filter. Unit names are ≤ 256 bytes; the
+/// glob matcher is O(pattern × text), so an unbounded pattern is a cheap
+/// CPU-burn vector across a large unit list.
+const MAX_GLOB_LEN: usize = 256;
+
 pub async fn services_list_result(
     be: &SystemBackend,
     params: ServicesListParams,
 ) -> Result<PageDto<UnitDto>, Diagnostic> {
+    if params
+        .name_glob
+        .as_deref()
+        .is_some_and(|g| g.len() > MAX_GLOB_LEN)
+    {
+        return Err(Diagnostic::error(codes::INVALID_PARAMS, "name_glob too long"));
+    }
     let mgr = be
         .services
         .as_ref()
@@ -224,6 +236,29 @@ mod tests {
         let params = ServicesListParams { state_filter: None, name_glob: None, page: None };
         let err = services_list_result(&be, params).await.unwrap_err();
         assert_eq!(err.code, "UNSUPPORTED");
+    }
+
+    #[tokio::test]
+    async fn services_list_rejects_oversized_glob() {
+        let be = full_backend();
+        let params = ServicesListParams {
+            state_filter: None,
+            name_glob: Some("*".repeat(MAX_GLOB_LEN + 1)),
+            page: None,
+        };
+        let err = services_list_result(&be, params).await.unwrap_err();
+        assert_eq!(err.code, vaiexia_core::diagnostic::codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn services_list_accepts_glob_at_limit() {
+        let be = full_backend();
+        let params = ServicesListParams {
+            state_filter: None,
+            name_glob: Some("*".repeat(MAX_GLOB_LEN)),
+            page: None,
+        };
+        assert!(services_list_result(&be, params).await.is_ok());
     }
 
     // ── B2 mutation tests ────────────────────────────────────────────────────

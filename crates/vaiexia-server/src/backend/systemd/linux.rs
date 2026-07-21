@@ -12,7 +12,7 @@ use crate::backend::{
     BackendError, Page, ServiceManager, ServiceState, UnitDetail, UnitStatus,
 };
 use super::unit::{active_state_from_dbus, validate};
-use super::manager::list_filter;
+use super::manager::{list_filter, paginate};
 
 // ── D-Bus proxy ──────────────────────────────────────────────────────────────
 
@@ -206,10 +206,6 @@ fn map_dbus_error(e: zbus::Error) -> BackendError {
 
 const PAGE_SIZE: usize = 25;
 
-fn cursor_of(idx: usize) -> String {
-    idx.to_string()
-}
-
 fn cursor_to_idx(cursor: &str) -> Option<usize> {
     cursor.parse().ok()
 }
@@ -248,12 +244,8 @@ impl ServiceManager for SystemdServices {
             .and_then(cursor_to_idx)
             .unwrap_or(0);
 
-        let items: Vec<UnitStatus> = filtered.iter().skip(start).take(PAGE_SIZE).cloned().collect();
-        let next = if start + PAGE_SIZE < filtered.len() {
-            Some(cursor_of(start + PAGE_SIZE))
-        } else {
-            None
-        };
+        // Overflow-safe pagination (`start` is a caller-supplied cursor).
+        let (items, next) = paginate(&filtered, start, PAGE_SIZE);
 
         Ok(Page { items, next })
     }
