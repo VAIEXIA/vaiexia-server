@@ -1,4 +1,5 @@
 pub mod assemble;
+pub mod capped;
 pub mod error;
 pub mod logs;
 pub mod metrics;

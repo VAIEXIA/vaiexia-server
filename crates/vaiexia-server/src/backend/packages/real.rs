@@ -3,16 +3,26 @@
 
 #![cfg(unix)]
 
+use std::time::Duration;
+
 use async_trait::async_trait;
 
+use crate::backend::capped::run_capped;
 use crate::backend::{BackendError, PackageInfo, PackageManager, Page};
 use super::detect::PackageKind;
 use super::query::{build_list_argv, parse_list};
 use super::privd_client::{send_request, response_to_result, PRIVD_SOCKET_PATH};
 use vaiexia_priv_proto::{PackageName, PrivRequest};
 
-/// Maximum bytes to read from package manager stdout.
+/// Maximum bytes to read from package manager stdout. The child is killed
+/// past this cap and the captured output is parsed up to the last complete line.
 const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024; // 16 MiB
+
+/// Hard deadline for a read-side package listing subprocess.
+const LIST_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Hard deadline for the `--version` probe.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct RealPackageManager {
     kind: PackageKind,
@@ -27,15 +37,15 @@ impl RealPackageManager {
         }
     }
 
-    /// Probe: can we execute the package manager binary?
+    /// Probe: can we execute the package manager binary? Bounded in both
+    /// time and captured output.
     pub async fn probe(kind: PackageKind) -> bool {
         use super::detect::binary_path;
-        tokio::process::Command::new(binary_path(kind))
-            .arg("--version")
-            .output()
-            .await
-            .map(|o| o.status.success())
-            .unwrap_or(false)
+        let args = vec!["--version".to_string()];
+        match run_capped(binary_path(kind), &args, 64 * 1024, PROBE_TIMEOUT).await {
+            Ok(out) => out.success,
+            Err(_) => false,
+        }
     }
 }
 
@@ -55,14 +65,34 @@ impl PackageManager for RealPackageManager {
         let program = argv[0].clone();
         let args = &argv[1..];
 
-        let output = tokio::process::Command::new(&program)
-            .args(args)
-            .env_clear()
-            .output()
+        let out = run_capped(&program, args, MAX_OUTPUT_BYTES, LIST_TIMEOUT)
             .await
-            .map_err(|_| BackendError::Unavailable)?;
+            .map_err(|e| {
+                tracing::warn!(kind = self.kind.as_str(), "package list: spawn/io failed: {e}");
+                BackendError::Unavailable
+            })?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        if out.timed_out {
+            tracing::warn!(kind = self.kind.as_str(), "package list: killed after {LIST_TIMEOUT:?}");
+            return Err(BackendError::Timeout);
+        }
+
+        let mut stdout_bytes = out.stdout;
+        if out.truncated {
+            tracing::warn!(
+                kind = self.kind.as_str(),
+                "package list: stdout exceeded {MAX_OUTPUT_BYTES} bytes; child killed, output truncated"
+            );
+            // Drop the trailing partial line so we never emit a garbage entry.
+            let cut = stdout_bytes
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            stdout_bytes.truncate(cut);
+        }
+
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
         let items = parse_list(self.kind, &stdout);
 
         Ok(Page { items, next: None })
