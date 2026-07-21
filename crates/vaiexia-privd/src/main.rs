@@ -1,3 +1,4 @@
+mod allowlist;
 mod exec;
 mod handler;
 
@@ -30,6 +31,31 @@ fn run_unix() {
         .and_then(|s| s.parse().ok())
         .unwrap_or_else(|| unsafe { libc::getuid() });
 
+    // Load the package allowlist (once at startup; restart to apply changes).
+    let allowlist_path = std::env::var(allowlist::PATH_ENV)
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(allowlist::DEFAULT_PATH));
+    let allowlist = match allowlist::load_allowlist(&allowlist_path) {
+        Ok(al) => {
+            match &al {
+                allowlist::Allowlist::Permissive => {
+                    eprintln!("vaiexia-privd: package allowlist: permissive (no allowlist file)");
+                }
+                allowlist::Allowlist::Restricted(set) => {
+                    eprintln!(
+                        "vaiexia-privd: package allowlist: restricted ({} packages)",
+                        set.len()
+                    );
+                }
+            }
+            al
+        }
+        Err(e) => {
+            eprintln!("privd: cannot read pkg-allowlist {}: {e}", allowlist_path.display());
+            std::process::exit(1);
+        }
+    };
+
     let job_lock = Arc::new(Mutex::new(()));
 
     // Socket activation: check LISTEN_FDS (systemd)
@@ -45,7 +71,7 @@ fn run_unix() {
             Ok(stream) => {
                 let job_lock = Arc::clone(&job_lock);
                 #[cfg(target_os = "linux")]
-                handle_connection(stream, daemon_uid, kind, &job_lock);
+                handle_connection(stream, daemon_uid, kind, &job_lock, &allowlist);
                 #[cfg(not(target_os = "linux"))]
                 {
                     // On non-linux unix (macOS) no SO_PEERCRED — refuse all

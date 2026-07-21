@@ -20,6 +20,7 @@ use std::time::Duration;
 
 use vaiexia_priv_proto::{PrivRequest, PrivResponse};
 
+use crate::allowlist::Allowlist;
 use crate::exec::{verb_to_argv, PackageKind};
 use crate::handler::handle;
 
@@ -217,7 +218,12 @@ fn run_exec(argv: &[String]) -> PrivResponse {
 }
 
 /// Dispatch a request: either handle it in-process or exec a package command.
-pub fn dispatch(req: &PrivRequest, kind: PackageKind, job_lock: &Mutex<()>) -> PrivResponse {
+pub fn dispatch(
+    req: &PrivRequest,
+    kind: PackageKind,
+    job_lock: &Mutex<()>,
+    allowlist: &Allowlist,
+) -> PrivResponse {
     // Ping/ProtoVersion: handled in-process, no exec
     if matches!(req, PrivRequest::Ping | PrivRequest::ProtoVersion) {
         return handle(req);
@@ -230,6 +236,20 @@ pub fn dispatch(req: &PrivRequest, kind: PackageKind, job_lock: &Mutex<()>) -> P
             return PrivResponse::Error { message: "busy: another operation in progress".into() }
         }
     };
+
+    // Allowlist enforcement for install/remove (BEFORE verb_to_argv — defense in depth:
+    // re-validates PackageName AND checks the operator-configured allowlist).
+    match req {
+        PrivRequest::PkgInstall { name } | PrivRequest::PkgRemove { name } => {
+            if !allowlist.permits(name.as_str()) {
+                eprintln!("privd: refused package '{}' (not in allowlist)", name.as_str());
+                return PrivResponse::Error {
+                    message: "rejected: package not in allowlist".into(),
+                };
+            }
+        }
+        _ => {}
+    }
 
     match verb_to_argv(req, kind) {
         Some(argv) => run_exec(&argv),
@@ -244,6 +264,7 @@ pub fn handle_connection(
     daemon_uid: u32,
     kind: PackageKind,
     job_lock: &Mutex<()>,
+    allowlist: &Allowlist,
 ) {
     // SO_PEERCRED uid check
     match peer_uid(&stream) {
@@ -281,7 +302,7 @@ pub fn handle_connection(
     };
 
     // Dispatch
-    let resp = dispatch(&req, kind, job_lock);
+    let resp = dispatch(&req, kind, job_lock, allowlist);
 
     // Write response
     let _ = write_response(&mut stream, &resp);
