@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/vaiexia-priv-proto", "crates/vaiexia-privd", "crates/vaiexia-server"]
+exclude = ["crates/vaiexia-server/fuzz"]
 
 [workspace.package]
 edition = "2024"

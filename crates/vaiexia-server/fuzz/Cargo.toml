@@ -1,0 +1,59 @@
+[package]
+name = "vaiexia-server-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]  # detach from the parent workspace (stable builds unaffected)
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+serde_json = "1"
+vaiexia-server = { path = ".." }
+vaiexia-priv-proto = { path = "../../vaiexia-priv-proto" }
+vaiexia-core = { path = "../../../../vaiexia-core" }
+
+[[bin]]
+name = "package_name"
+path = "fuzz_targets/package_name.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "unit_name"
+path = "fuzz_targets/unit_name.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "journal_line"
+path = "fuzz_targets/journal_line.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "priv_request"
+path = "fuzz_targets/priv_request.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "token_parse"
+path = "fuzz_targets/token_parse.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "pkg_list"
+path = "fuzz_targets/pkg_list.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "audit_chain"
+path = "fuzz_targets/audit_chain.rs"
+test = false
+doc = false
