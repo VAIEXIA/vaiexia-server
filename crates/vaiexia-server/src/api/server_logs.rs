@@ -50,6 +50,16 @@ pub async fn logs_query_result(
         return Err(Diagnostic::error(codes::INVALID_PARAMS, "invalid unit name"));
     }
 
+    // Validate the (opaque) resume cursor: non-empty, bounded, no control
+    // chars. It is passed to `journalctl --after-cursor` as an argv operand.
+    if params
+        .cursor
+        .as_deref()
+        .is_some_and(|c| !crate::backend::logs::cursor::is_valid(c))
+    {
+        return Err(Diagnostic::error(codes::INVALID_PARAMS, "invalid cursor"));
+    }
+
     let provider = be
         .logs
         .as_ref()
@@ -163,6 +173,47 @@ mod tests {
             until: None,
             limit: 10,
             cursor: None,
+        };
+        assert!(logs_query_result(&be, params).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn logs_query_rejects_empty_cursor() {
+        let be = full_backend();
+        let params = LogsQueryParams {
+            unit: None,
+            since: None,
+            until: None,
+            limit: 10,
+            cursor: Some(String::new()),
+        };
+        let err = logs_query_result(&be, params).await.unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn logs_query_rejects_oversized_cursor() {
+        let be = full_backend();
+        let params = LogsQueryParams {
+            unit: None,
+            since: None,
+            until: None,
+            limit: 10,
+            cursor: Some("s=".to_string() + &"a".repeat(4096)),
+        };
+        let err = logs_query_result(&be, params).await.unwrap_err();
+        assert_eq!(err.code, codes::INVALID_PARAMS);
+    }
+
+    #[tokio::test]
+    async fn logs_query_accepts_realistic_cursor() {
+        let be = full_backend();
+        let params = LogsQueryParams {
+            unit: None,
+            since: None,
+            until: None,
+            limit: 10,
+            cursor: Some("s=abc123;i=1;b=def456".into()),
         };
         assert!(logs_query_result(&be, params).await.is_ok());
     }

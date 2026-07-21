@@ -95,12 +95,21 @@ pub struct SystemdServices {
     unit_tx: broadcast::Sender<UnitStatus>,
 }
 
+/// Deadline for establishing the system-bus connection. A hung bus socket
+/// must not stall daemon startup (assemble) indefinitely.
+const DBUS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl SystemdServices {
-    /// Connect to the system bus. Returns an error if the bus is unreachable.
+    /// Connect to the system bus. Returns an error if the bus is unreachable
+    /// or does not answer within `DBUS_CONNECT_TIMEOUT`.
     pub async fn new() -> Result<Arc<Self>, BackendError> {
-        let conn = Connection::system()
+        let conn = tokio::time::timeout(DBUS_CONNECT_TIMEOUT, Connection::system())
             .await
-            .map_err(|_| BackendError::Unavailable)?;
+            .map_err(|_| BackendError::Timeout)?
+            .map_err(|e| {
+                tracing::warn!("systemd: system bus connect failed: {e}");
+                BackendError::Unavailable
+            })?;
         let (unit_tx, _) = broadcast::channel(256);
         let svc = Arc::new(Self { conn, unit_tx });
         // Spawn the watch task.
@@ -112,9 +121,12 @@ impl SystemdServices {
         Ok(svc)
     }
 
-    /// Probe whether the system D-Bus is reachable.
+    /// Probe whether the system D-Bus is reachable (bounded).
     pub async fn probe() -> bool {
-        Connection::system().await.is_ok()
+        matches!(
+            tokio::time::timeout(DBUS_CONNECT_TIMEOUT, Connection::system()).await,
+            Ok(Ok(_))
+        )
     }
 
     /// Issue a start/stop/restart verb, await the matching JobRemoved signal,
@@ -188,6 +200,9 @@ impl SystemdServices {
 
 fn map_dbus_error(e: zbus::Error) -> BackendError {
     let msg = e.to_string();
+    // Raw D-Bus errors never cross the wire (§7) — but keep the cause
+    // observable server-side.
+    tracing::debug!("systemd dbus error: {msg}");
     if msg.contains("AccessDenied")
         || msg.contains("PolicyKit")
         || msg.contains("Authorization")
