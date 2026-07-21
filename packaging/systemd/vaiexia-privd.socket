@@ -1,0 +1,12 @@
+[Unit]
+Description=VAIEXIA privileged helper socket
+
+[Socket]
+ListenStream=/run/vaiexia/privd.sock
+SocketMode=0600
+SocketUser=vaiexia
+SocketGroup=vaiexia
+# Single connection service (no Accept=yes fan-out): privd serializes jobs.
+
+[Install]
+WantedBy=sockets.target

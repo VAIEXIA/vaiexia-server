@@ -1,0 +1,39 @@
+[Unit]
+Description=VAIEXIA privileged package helper
+Documentation=file:/usr/share/doc/vaiexia/THREAT-MODEL.md
+Requires=vaiexia-privd.socket
+After=vaiexia-privd.socket
+
+[Service]
+Type=exec
+ExecStart=/usr/bin/vaiexia-privd
+Environment=VAIEXIA_DAEMON_UID=%U
+# NOTE: %U here is the *service* user (root) — the real daemon uid must be
+# injected at install time; INSTALL.md ships a drop-in that sets
+# Environment=VAIEXIA_DAEMON_UID=<uid of vaiexia>. privd defaults to its own
+# uid otherwise (fail-closed against the wrong peer, verified in main.rs).
+Restart=on-failure
+RestartSec=2
+
+# ── PRIVILEGE SPLIT (confirmed decision — see THREAT-MODEL.md) ────────────
+# privd runs as ROOT with NO SystemCallFilter and NO capability drop: package
+# managers legitimately need broad root, and apt/dnf maintainer scripts run
+# arbitrary syscalls — a seccomp filter here would silently break installs.
+# Containment is instead: (1) the CLOSED VERB VOCABULARY (PrivRequest — no
+# generic exec), (2) the SO_PEERCRED uid gate, (3) in-privd PackageName
+# re-validation, (4) the OPTIONAL operator package allowlist
+# (/etc/vaiexia/pkg-allowlist — fail-closed when present; see INSTALL.md),
+# (5) one job at a time + hard timeout. The DAEMON side is the inverse:
+# non-root, CapabilityBoundingSet= (empty), full
+# SystemCallFilter=@system-service — see vaiexia-server.service.
+# The sandbox below is defense in depth on top of that boundary. Package
+# managers write broadly — ReadWritePaths stays wide by necessity.
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var /usr /etc /boot /opt
+PrivateTmp=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native

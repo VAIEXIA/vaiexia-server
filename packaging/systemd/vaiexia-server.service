@@ -1,0 +1,48 @@
+[Unit]
+Description=VAIEXIA management daemon
+Documentation=file:/usr/share/doc/vaiexia/INSTALL.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=vaiexia
+Group=vaiexia
+ExecStartPre=/usr/bin/vaiexia-server --check-config --config /etc/vaiexia/server.toml
+ExecStart=/usr/bin/vaiexia-server --config /etc/vaiexia/server.toml
+Restart=on-failure
+RestartSec=2
+TimeoutStartSec=30
+
+# ── Sandbox (spec §4) ─────────────────────────────────────────────
+NoNewPrivileges=true
+UMask=0077
+ProtectSystem=strict
+ProtectHome=true
+StateDirectory=vaiexia
+StateDirectoryMode=0700
+ReadWritePaths=/var/lib/vaiexia
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RemoveIPC=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
