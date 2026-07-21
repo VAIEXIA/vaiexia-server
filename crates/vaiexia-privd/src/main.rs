@@ -17,11 +17,9 @@ fn main() {
 
 #[cfg(unix)]
 fn run_unix() {
-    use std::os::unix::net::UnixListener;
     use std::sync::{Arc, Mutex};
 
-    use exec::PackageKind;
-    use socket::{handle_connection, SOCKET_PATH};
+    use socket::handle_connection;
 
     // Detect package manager from /etc/os-release
     let kind = detect_package_kind();

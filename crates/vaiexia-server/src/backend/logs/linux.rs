@@ -93,7 +93,7 @@ impl LogProvider for JournaldLogs {
             .env_clear()
             .output()
             .await
-            .map_err(|e| BackendError::Unavailable)?;
+            .map_err(|_| BackendError::Unavailable)?;
 
         if !output.status.success() && output.stdout.is_empty() {
             return Err(BackendError::Unavailable);

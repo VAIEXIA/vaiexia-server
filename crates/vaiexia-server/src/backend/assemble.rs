@@ -181,8 +181,8 @@ fn probe_journald_logs_blocking() -> Option<Arc<dyn crate::backend::LogProvider>
 #[cfg(target_os = "linux")]
 fn probe_packages_blocking() -> Option<Arc<dyn crate::backend::PackageManager>> {
     use crate::backend::packages::{
-        detect::{from_os_release, confirm, binary_path},
-        real::RealPackageManager,
+        detect::{from_os_release, confirm},
+        RealPackageManager,
     };
 
     // Detect from /etc/os-release
