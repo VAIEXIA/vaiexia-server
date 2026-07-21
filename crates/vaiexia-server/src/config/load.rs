@@ -13,8 +13,8 @@ pub enum ConfigError {
     Empty,
     #[error("obfs listeners are deferred (see spec §5.4)")]
     ObfsDeferred,
-    #[error("TLS material (cert/key) missing for https listener")]
-    TlsMaterialMissing,
+    #[error("listener[{index}] ({bind}): {reason}")]
+    Listener { index: usize, bind: String, reason: String },
     #[error("config error: {0}")]
     Figment(String),
 }
@@ -39,14 +39,37 @@ pub fn validate(cfg: &ServerConfig) -> Result<Vec<String>, ConfigError> {
         return Err(ConfigError::Empty);
     }
     let mut warnings = Vec::new();
-    for l in &cfg.listeners {
+    for (index, l) in cfg.listeners.iter().enumerate() {
         match l.kind {
             ListenerKind::ObfsTcp | ListenerKind::ObfsUdp => {
                 return Err(ConfigError::ObfsDeferred);
             }
             ListenerKind::Https => {
-                if l.cert.is_none() || l.key.is_none() {
-                    return Err(ConfigError::TlsMaterialMissing);
+                // Both cert and key are required.
+                let cert = l.cert.as_deref().ok_or_else(|| ConfigError::Listener {
+                    index,
+                    bind: l.bind.clone(),
+                    reason: "https listener requires cert and key paths".into(),
+                })?;
+                let key = l.key.as_deref().ok_or_else(|| ConfigError::Listener {
+                    index,
+                    bind: l.bind.clone(),
+                    reason: "https listener requires cert and key paths".into(),
+                })?;
+                // Existence check: validate() runs at startup with daemon privileges.
+                if !cert.is_file() {
+                    return Err(ConfigError::Listener {
+                        index,
+                        bind: l.bind.clone(),
+                        reason: format!("cert not readable: {}", cert.display()),
+                    });
+                }
+                if !key.is_file() {
+                    return Err(ConfigError::Listener {
+                        index,
+                        bind: l.bind.clone(),
+                        reason: format!("key not readable: {}", key.display()),
+                    });
                 }
             }
             ListenerKind::Http => {
@@ -140,7 +163,27 @@ bind = "127.0.0.1:7443"
             }],
             ..Default::default()
         };
-        assert!(matches!(validate(&cfg), Err(ConfigError::TlsMaterialMissing)));
+        assert!(matches!(validate(&cfg), Err(ConfigError::Listener { .. })));
+    }
+
+    #[test]
+    fn validate_https_with_missing_files_returns_err() {
+        // Paths set but files absent → Listener error naming the path.
+        let cfg = ServerConfig {
+            state_dir: PathBuf::from("/var/lib/vaiexia"),
+            listeners: vec![Listener {
+                kind: ListenerKind::Https,
+                bind: "127.0.0.1:443".into(),
+                cert: Some(PathBuf::from("/definitely/missing/cert.pem")),
+                key: Some(PathBuf::from("/definitely/missing/key.pem")),
+            }],
+            ..Default::default()
+        };
+        let err = validate(&cfg).unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::Listener { reason, .. } if reason.contains("cert not readable")),
+            "got: {err}"
+        );
     }
 
     #[test]
