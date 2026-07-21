@@ -179,9 +179,15 @@ fn parse_dnf_list(stdout: &str) -> Vec<PackageInfo> {
         if parts.len() < 2 {
             continue;
         }
-        // name may have arch suffix like "nginx.x86_64" — strip it
+        // Name carries a trailing arch suffix like "nginx.x86_64" — strip only
+        // the LAST dot segment; package names may themselves contain dots
+        // (e.g. "python3.11.x86_64" → "python3.11").
         let name_arch = parts[0];
-        let name = name_arch.split('.').next().unwrap_or(name_arch).to_string();
+        let name = name_arch
+            .rsplit_once('.')
+            .map(|(base, _arch)| base)
+            .unwrap_or(name_arch)
+            .to_string();
         let version = parts[1].to_string();
         let installed = parts.get(2).map(|r| r.starts_with('@')).unwrap_or(false);
         result.push(PackageInfo { name, version, installed, summary: None });
@@ -387,6 +393,26 @@ vim-enhanced.x86_64     9.0.1-1.fc39            fedora\n";
         let pkgs = parse_list(PackageKind::Dnf, DNF_FIXTURE);
         let vim = pkgs.iter().find(|p| p.name == "vim-enhanced").unwrap();
         assert!(!vim.installed);
+    }
+
+    #[test]
+    fn parse_dnf_dotted_package_name_keeps_dots() {
+        // Only the trailing arch suffix must be stripped — package names may
+        // themselves contain dots (python3.11, java-17-openjdk.x86_64 ...).
+        let fixture = "python3.11.x86_64    3.11.9-1.fc39    @updates\n";
+        let pkgs = parse_list(PackageKind::Dnf, fixture);
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].name, "python3.11");
+        assert!(pkgs[0].installed);
+    }
+
+    #[test]
+    fn parse_dnf_name_without_arch_suffix_unchanged() {
+        let fixture = "standalone    1.0    repo\n";
+        let pkgs = parse_list(PackageKind::Dnf, fixture);
+        assert_eq!(pkgs.len(), 1);
+        assert_eq!(pkgs[0].name, "standalone");
+        assert!(!pkgs[0].installed);
     }
 
     const PACMAN_FIXTURE: &str = "\

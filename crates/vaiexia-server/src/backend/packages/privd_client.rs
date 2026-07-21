@@ -14,6 +14,18 @@ use crate::backend::BackendError;
 /// Default socket path for the vaiexia-privd daemon.
 pub const PRIVD_SOCKET_PATH: &str = "/run/vaiexia/privd.sock";
 
+/// Read timeout for the privd response.
+///
+/// privd replies only once the package operation finishes, and enforces its
+/// own hard EXEC_TIMEOUT of 300s per operation (vaiexia-privd/src/socket.rs).
+/// The client must wait strictly LONGER than that, otherwise every install
+/// slower than the client timeout is misreported as Unavailable while privd
+/// keeps working. 330s = privd's 300s + margin.
+const READ_TIMEOUT: Duration = Duration::from_secs(330);
+
+/// Write timeout for sending the (small) request frame.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Send a request to vaiexia-privd and return the response.
 ///
 /// Uses length-prefixed framing: 4-byte big-endian length + JSON payload.
@@ -21,14 +33,16 @@ pub fn send_request(
     socket_path: &str,
     req: &PrivRequest,
 ) -> Result<PrivResponse, BackendError> {
-    let mut stream = UnixStream::connect(socket_path)
-        .map_err(|_| BackendError::Unavailable)?;
+    let mut stream = UnixStream::connect(socket_path).map_err(|e| {
+        tracing::warn!("privd client: connect {socket_path} failed: {e}");
+        BackendError::Unavailable
+    })?;
 
     stream
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(READ_TIMEOUT))
         .map_err(|_| BackendError::Unavailable)?;
     stream
-        .set_write_timeout(Some(Duration::from_secs(10)))
+        .set_write_timeout(Some(WRITE_TIMEOUT))
         .map_err(|_| BackendError::Unavailable)?;
 
     // Serialize request
@@ -41,18 +55,21 @@ pub fn send_request(
 
     // Write length-prefixed frame: 4-byte BE length + payload
     let len = payload.len() as u32;
-    stream
-        .write_all(&len.to_be_bytes())
-        .map_err(|_| BackendError::Unavailable)?;
-    stream
-        .write_all(&payload)
-        .map_err(|_| BackendError::Unavailable)?;
+    stream.write_all(&len.to_be_bytes()).map_err(|e| {
+        tracing::warn!("privd client: write frame length failed: {e}");
+        BackendError::Unavailable
+    })?;
+    stream.write_all(&payload).map_err(|e| {
+        tracing::warn!("privd client: write payload failed: {e}");
+        BackendError::Unavailable
+    })?;
 
     // Read length-prefixed response
     let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
-        .map_err(|_| BackendError::Unavailable)?;
+    stream.read_exact(&mut len_buf).map_err(|e| {
+        tracing::warn!("privd client: read response length failed: {e}");
+        BackendError::Unavailable
+    })?;
     let resp_len = u32::from_be_bytes(len_buf) as usize;
 
     if resp_len > 1 << 20 {
@@ -60,9 +77,10 @@ pub fn send_request(
     }
 
     let mut resp_buf = vec![0u8; resp_len];
-    stream
-        .read_exact(&mut resp_buf)
-        .map_err(|_| BackendError::Unavailable)?;
+    stream.read_exact(&mut resp_buf).map_err(|e| {
+        tracing::warn!("privd client: read response payload failed: {e}");
+        BackendError::Unavailable
+    })?;
 
     let resp: PrivResponse = serde_json::from_slice(&resp_buf)
         .map_err(|_| BackendError::Internal("deserialize response".into()))?;
