@@ -3,6 +3,7 @@
 
 #![cfg(unix)]
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -11,7 +12,8 @@ use crate::backend::capped::run_capped;
 use crate::backend::{BackendError, PackageInfo, PackageManager, Page};
 use super::detect::PackageKind;
 use super::query::{build_list_argv, parse_list};
-use super::privd_client::{send_request, response_to_result, PRIVD_SOCKET_PATH};
+use super::privd_client::{response_to_result, UnixPrivTransport, PRIVD_SOCKET_PATH};
+use super::priv_transport::PrivTransport;
 use vaiexia_priv_proto::{PackageName, PrivRequest};
 
 /// Maximum bytes to read from package manager stdout. The child is killed
@@ -26,15 +28,21 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct RealPackageManager {
     kind: PackageKind,
-    socket_path: String,
+    transport: Arc<dyn PrivTransport>,
 }
 
 impl RealPackageManager {
     pub fn new(kind: PackageKind) -> Self {
+        let transport = UnixPrivTransport::new(PRIVD_SOCKET_PATH);
         Self {
             kind,
-            socket_path: PRIVD_SOCKET_PATH.to_string(),
+            transport: Arc::new(transport),
         }
+    }
+
+    /// Create with a custom `PrivTransport` (e.g. a test double).
+    pub fn with_transport(kind: PackageKind, transport: Arc<dyn PrivTransport>) -> Self {
+        Self { kind, transport }
     }
 
     /// Probe: can we execute the package manager binary? Bounded in both
@@ -103,10 +111,10 @@ impl PackageManager for RealPackageManager {
             .map_err(|_| BackendError::InvalidInput(format!("invalid package name: {name}")))?;
 
         let req = PrivRequest::PkgInstall { name: pkg_name };
-        let socket_path = self.socket_path.clone();
+        let transport = Arc::clone(&self.transport);
 
-        // Run blocking unix socket I/O on a thread pool thread
-        let resp = tokio::task::spawn_blocking(move || send_request(&socket_path, &req))
+        // Run blocking channel I/O on a thread pool thread
+        let resp = tokio::task::spawn_blocking(move || transport.request(&req))
             .await
             .map_err(|_| BackendError::Unavailable)??;
 
@@ -118,12 +126,91 @@ impl PackageManager for RealPackageManager {
             .map_err(|_| BackendError::InvalidInput(format!("invalid package name: {name}")))?;
 
         let req = PrivRequest::PkgRemove { name: pkg_name };
-        let socket_path = self.socket_path.clone();
+        let transport = Arc::clone(&self.transport);
 
-        let resp = tokio::task::spawn_blocking(move || send_request(&socket_path, &req))
+        let resp = tokio::task::spawn_blocking(move || transport.request(&req))
             .await
             .map_err(|_| BackendError::Unavailable)??;
 
         response_to_result(resp)
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use vaiexia_priv_proto::{PackageName, PrivRequest, PrivResponse};
+
+    use super::super::detect::PackageKind;
+
+    /// A fake in-memory `PrivTransport` that records all requests sent to it
+    /// and returns a configurable `PrivResponse`.
+    struct FakePrivTransport {
+        response: PrivResponse,
+        calls: Mutex<Vec<PrivRequest>>,
+    }
+
+    impl FakePrivTransport {
+        fn new(response: PrivResponse) -> Self {
+            Self { response, calls: Mutex::new(Vec::new()) }
+        }
+
+        fn recorded(&self) -> Vec<PrivRequest> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl PrivTransport for FakePrivTransport {
+        fn request(&self, req: &PrivRequest) -> Result<PrivResponse, BackendError> {
+            self.calls.lock().unwrap().push(req.clone());
+            Ok(self.response.clone())
+        }
+    }
+
+    fn make_pm(response: PrivResponse) -> (RealPackageManager, Arc<FakePrivTransport>) {
+        let transport = Arc::new(FakePrivTransport::new(response));
+        let pm = RealPackageManager::with_transport(
+            PackageKind::Apt,
+            Arc::clone(&transport) as Arc<dyn PrivTransport>,
+        );
+        (pm, transport)
+    }
+
+    #[tokio::test]
+    async fn install_routes_through_trait() {
+        let (pm, transport) = make_pm(PrivResponse::Ok);
+        pm.install("nginx").await.expect("install should succeed");
+
+        let calls = transport.recorded();
+        assert_eq!(calls.len(), 1, "expected exactly one transport call");
+        assert!(
+            matches!(&calls[0], PrivRequest::PkgInstall { name } if name == &PackageName::parse("nginx").unwrap()),
+            "unexpected request variant: {:?}",
+            calls[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn remove_routes_through_trait() {
+        let (pm, transport) = make_pm(PrivResponse::Ok);
+        pm.remove("nginx").await.expect("remove should succeed");
+
+        let calls = transport.recorded();
+        assert_eq!(calls.len(), 1, "expected exactly one transport call");
+        assert!(
+            matches!(&calls[0], PrivRequest::PkgRemove { name } if name == &PackageName::parse("nginx").unwrap()),
+            "unexpected request variant: {:?}",
+            calls[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn install_propagates_transport_error() {
+        let (pm, _transport) = make_pm(PrivResponse::Error { message: "boom".into() });
+        let err = pm.install("nginx").await.expect_err("expected an error");
+        assert!(matches!(err, BackendError::Internal(_)));
     }
 }

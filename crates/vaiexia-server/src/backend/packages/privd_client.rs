@@ -10,6 +10,7 @@ use std::time::Duration;
 use vaiexia_priv_proto::{PrivRequest, PrivResponse};
 
 use crate::backend::BackendError;
+use super::priv_transport::PrivTransport;
 
 /// Default socket path for the vaiexia-privd daemon.
 pub const PRIVD_SOCKET_PATH: &str = "/run/vaiexia/privd.sock";
@@ -87,6 +88,32 @@ pub fn send_request(
 
     Ok(resp)
 }
+
+// ── UnixPrivTransport ────────────────────────────────────────────────────────
+
+/// A `PrivTransport` implementation that connects to the `vaiexia-privd`
+/// daemon over a Unix-domain socket.
+///
+/// Cheap to clone — the socket path is a single `Arc<str>` under the hood
+/// (or a plain `String` here, cloned once at construction time).
+pub struct UnixPrivTransport {
+    socket_path: String,
+}
+
+impl UnixPrivTransport {
+    /// Create a transport targeting `socket_path`.
+    pub fn new(socket_path: impl Into<String>) -> Self {
+        Self { socket_path: socket_path.into() }
+    }
+}
+
+impl PrivTransport for UnixPrivTransport {
+    fn request(&self, req: &PrivRequest) -> Result<PrivResponse, BackendError> {
+        send_request(&self.socket_path, req)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Map a `PrivResponse` to a `Result<(), BackendError>`.
 pub fn response_to_result(resp: PrivResponse) -> Result<(), BackendError> {
