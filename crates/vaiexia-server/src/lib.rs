@@ -37,7 +37,7 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
     ));
 
     // Assemble backend from config (Auto/Mock/Real mode).
-    let backend = Arc::new(assemble(&cfg)?);
+    let backend = Arc::new(assemble(&cfg).await?);
 
     let (service, pump_handles) = lifecycle::build_service(backend, store, bootstrap);
     let handles = transport::start_listeners(&cfg, service).await?;

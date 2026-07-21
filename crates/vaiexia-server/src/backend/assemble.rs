@@ -18,14 +18,18 @@ pub enum AssembleError {
 ///
 /// - `Mock` → all-mock providers (deterministic, no OS dependencies), caps all true.
 /// - `Auto` → real `metrics` (sysinfo) always; on non-Linux the optional providers
-///   (services/packages/logs) degrade to `None`. On Linux, real impls land
-///   in Parts B/C — TODO placeholders return `None` until those parts ship.
+///   (services/packages/logs) degrade to `None`. On Linux each provider is
+///   probed and degrades to `None` (→ UNSUPPORTED at the API) on failure.
 /// - `Real` → like Auto but off-Linux → `Err(AssembleError::UnsupportedPlatform)`.
-pub fn assemble(cfg: &ServerConfig) -> Result<SystemBackend, AssembleError> {
+///
+/// Async: must be called from within the daemon's tokio runtime. The Linux
+/// providers spawn long-lived background tasks (systemd watch, journald
+/// follow) which must land on the runtime that outlives assembly.
+pub async fn assemble(cfg: &ServerConfig) -> Result<SystemBackend, AssembleError> {
     match cfg.backend.mode {
         BackendMode::Mock => Ok(assemble_mock()),
-        BackendMode::Auto => Ok(assemble_auto()),
-        BackendMode::Real => assemble_real(),
+        BackendMode::Auto => Ok(assemble_auto().await),
+        BackendMode::Real => assemble_real().await,
     }
 }
 
@@ -34,13 +38,13 @@ fn assemble_mock() -> SystemBackend {
     SystemBackend::from_mock(mock)
 }
 
-fn assemble_auto() -> SystemBackend {
+async fn assemble_auto() -> SystemBackend {
     let metrics = Arc::new(SysinfoMetrics::new()) as Arc<dyn crate::backend::MetricsProvider>;
 
-    // On Linux, real service/log/package providers will be wired in Parts B/C.
+    // On Linux, real service/log/package providers are probed at startup.
     // Off-Linux (Windows, macOS) they are None — graceful degradation.
     #[cfg(target_os = "linux")]
-    let (services, packages, logs) = assemble_linux_providers_auto();
+    let (services, packages, logs) = assemble_linux_providers_auto().await;
 
     #[cfg(not(target_os = "linux"))]
     let (services, packages, logs) = (None, None, None);
@@ -71,17 +75,14 @@ fn assemble_auto() -> SystemBackend {
     }
 }
 
-fn assemble_real() -> Result<SystemBackend, AssembleError> {
+async fn assemble_real() -> Result<SystemBackend, AssembleError> {
     #[cfg(not(target_os = "linux"))]
     return Err(AssembleError::UnsupportedPlatform);
 
     #[cfg(target_os = "linux")]
     {
-        // On Linux, Real mode would attempt all providers and fail if any are unavailable.
-        // Until Parts B/C land, the real providers are TODO placeholders returning None.
-        // When real probes are wired (B2/C4), a failed probe here becomes an error.
         let metrics = Arc::new(SysinfoMetrics::new()) as Arc<dyn crate::backend::MetricsProvider>;
-        let (services, packages, logs) = assemble_linux_providers_auto();
+        let (services, packages, logs) = assemble_linux_providers_auto().await;
 
         let caps = probe::derive_capabilities(
             services.is_some(),
@@ -106,80 +107,63 @@ fn assemble_real() -> Result<SystemBackend, AssembleError> {
 }
 
 #[cfg(target_os = "linux")]
-fn assemble_linux_providers_auto() -> (
+async fn assemble_linux_providers_auto() -> (
     Option<Arc<dyn crate::backend::ServiceManager>>,
     Option<Arc<dyn crate::backend::PackageManager>>,
     Option<Arc<dyn crate::backend::LogProvider>>,
 ) {
     // Part B: wire SystemdServices if the system D-Bus is reachable.
     let services: Option<Arc<dyn crate::backend::ServiceManager>> =
-        probe_systemd_services_blocking();
+        probe_systemd_services().await;
 
     // Part C: wire JournaldLogs if journalctl is reachable.
-    let logs: Option<Arc<dyn crate::backend::LogProvider>> = probe_journald_logs_blocking();
+    let logs: Option<Arc<dyn crate::backend::LogProvider>> = probe_journald_logs().await;
 
     // Part C: wire real PackageManager if detected and privd socket reachable.
-    let packages: Option<Arc<dyn crate::backend::PackageManager>> =
-        probe_packages_blocking();
+    let packages: Option<Arc<dyn crate::backend::PackageManager>> = probe_packages();
 
     (services, packages, logs)
 }
 
 #[cfg(target_os = "linux")]
-fn probe_systemd_services_blocking() -> Option<Arc<dyn crate::backend::ServiceManager>> {
+async fn probe_systemd_services() -> Option<Arc<dyn crate::backend::ServiceManager>> {
     use crate::backend::systemd::SystemdServices;
-    // We need a short-lived tokio runtime to run the async probe + constructor.
-    // assemble() is called from a sync context (before the main runtime starts).
-    // If we are already inside an async context this would panic — guard against it.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
 
-    rt.block_on(async {
-        if !SystemdServices::probe().await {
-            tracing::info!("assemble[auto/linux]: system D-Bus unreachable — services=None");
-            return None;
+    if !SystemdServices::probe().await {
+        tracing::info!("assemble[auto/linux]: system D-Bus unreachable — services=None");
+        return None;
+    }
+    match SystemdServices::new().await {
+        Ok(svc) => {
+            tracing::info!("assemble[auto/linux]: SystemdServices wired");
+            Some(svc as Arc<dyn crate::backend::ServiceManager>)
         }
-        match SystemdServices::new().await {
-            Ok(svc) => {
-                tracing::info!("assemble[auto/linux]: SystemdServices wired");
-                Some(svc as Arc<dyn crate::backend::ServiceManager>)
-            }
-            Err(e) => {
-                tracing::warn!("assemble[auto/linux]: SystemdServices init failed: {e} — services=None");
-                None
-            }
+        Err(e) => {
+            tracing::warn!("assemble[auto/linux]: SystemdServices init failed: {e} — services=None");
+            None
         }
-    })
+    }
 }
 
 // ── Journald probe ────────────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-fn probe_journald_logs_blocking() -> Option<Arc<dyn crate::backend::LogProvider>> {
+async fn probe_journald_logs() -> Option<Arc<dyn crate::backend::LogProvider>> {
     use crate::backend::logs::JournaldLogs;
 
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-
-    rt.block_on(async {
-        if !JournaldLogs::probe().await {
-            tracing::info!("assemble[auto/linux]: journalctl unreachable — logs=None");
-            return None;
-        }
-        let logs = JournaldLogs::new();
-        tracing::info!("assemble[auto/linux]: JournaldLogs wired");
-        Some(Arc::new(logs) as Arc<dyn crate::backend::LogProvider>)
-    })
+    if !JournaldLogs::probe().await {
+        tracing::info!("assemble[auto/linux]: journalctl unreachable — logs=None");
+        return None;
+    }
+    let logs = JournaldLogs::new();
+    tracing::info!("assemble[auto/linux]: JournaldLogs wired");
+    Some(Arc::new(logs) as Arc<dyn crate::backend::LogProvider>)
 }
 
 // ── Package manager probe ─────────────────────────────────────────────────────
 
 #[cfg(target_os = "linux")]
-fn probe_packages_blocking() -> Option<Arc<dyn crate::backend::PackageManager>> {
+fn probe_packages() -> Option<Arc<dyn crate::backend::PackageManager>> {
     use crate::backend::packages::{
         detect::{from_os_release, confirm},
         RealPackageManager,
@@ -230,50 +214,50 @@ mod tests {
         assert_eq!(cfg.mode, BackendMode::Auto);
     }
 
-    #[test]
-    fn assemble_mock_mode_gives_all_caps_true() {
+    #[tokio::test]
+    async fn assemble_mock_mode_gives_all_caps_true() {
         let cfg = cfg_with_mode(BackendMode::Mock);
-        let backend = assemble(&cfg).expect("mock assemble should succeed");
+        let backend = assemble(&cfg).await.expect("mock assemble should succeed");
         assert!(backend.caps.services, "mock caps.services must be true");
         assert!(backend.caps.packages, "mock caps.packages must be true");
         assert!(backend.caps.metrics, "mock caps.metrics must be true");
         assert!(backend.caps.logs, "mock caps.logs must be true");
     }
 
-    #[test]
-    fn assemble_mock_mode_providers_all_present() {
+    #[tokio::test]
+    async fn assemble_mock_mode_providers_all_present() {
         let cfg = cfg_with_mode(BackendMode::Mock);
-        let backend = assemble(&cfg).expect("mock assemble should succeed");
+        let backend = assemble(&cfg).await.expect("mock assemble should succeed");
         assert!(backend.services.is_some(), "mock services provider must be Some");
         assert!(backend.packages.is_some(), "mock packages provider must be Some");
         assert!(backend.logs.is_some(), "mock logs provider must be Some");
     }
 
-    #[test]
-    fn assemble_mock_mode_metrics_works() {
+    #[tokio::test]
+    async fn assemble_mock_mode_metrics_works() {
         let cfg = cfg_with_mode(BackendMode::Mock);
-        let backend = assemble(&cfg).expect("mock assemble should succeed");
+        let backend = assemble(&cfg).await.expect("mock assemble should succeed");
         let snap = backend.metrics.snapshot().expect("mock metrics snapshot should succeed");
         assert!(snap.mem_total > 0);
     }
 
-    #[test]
-    fn assemble_auto_mode_has_real_metrics() {
+    #[tokio::test]
+    async fn assemble_auto_mode_has_real_metrics() {
         let cfg = cfg_with_mode(BackendMode::Auto);
-        let backend = assemble(&cfg).expect("auto assemble should succeed");
+        let backend = assemble(&cfg).await.expect("auto assemble should succeed");
         let snap = backend.metrics.snapshot().expect("auto metrics snapshot should succeed");
         // Real sysinfo — mem_total must reflect the actual host
         assert!(snap.mem_total > 0, "auto mode must report real mem_total > 0");
         assert!(snap.uptime_secs > 0, "auto mode must report real uptime > 0");
     }
 
-    #[test]
-    fn assemble_auto_mode_non_linux_services_none() {
+    #[tokio::test]
+    async fn assemble_auto_mode_non_linux_services_none() {
         // On Windows/macOS, services/packages/logs are None (real impls need Linux)
         #[cfg(not(target_os = "linux"))]
         {
             let cfg = cfg_with_mode(BackendMode::Auto);
-            let backend = assemble(&cfg).expect("auto assemble should succeed");
+            let backend = assemble(&cfg).await.expect("auto assemble should succeed");
             assert!(backend.services.is_none(), "off-linux auto services must be None");
             assert!(backend.packages.is_none(), "off-linux auto packages must be None");
             assert!(backend.logs.is_none(), "off-linux auto logs must be None");
@@ -283,18 +267,18 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            // On Linux, auto may or may not have services — just check it compiles
+            // On Linux, auto may or may not have services — just check it runs
             let cfg = cfg_with_mode(BackendMode::Auto);
-            let _backend = assemble(&cfg).expect("auto assemble should succeed on linux");
+            let _backend = assemble(&cfg).await.expect("auto assemble should succeed on linux");
         }
     }
 
-    #[test]
-    fn assemble_real_mode_off_linux_returns_error() {
+    #[tokio::test]
+    async fn assemble_real_mode_off_linux_returns_error() {
         #[cfg(not(target_os = "linux"))]
         {
             let cfg = cfg_with_mode(BackendMode::Real);
-            let result = assemble(&cfg);
+            let result = assemble(&cfg).await;
             assert!(
                 matches!(result, Err(AssembleError::UnsupportedPlatform)),
                 "Real mode off-linux must return UnsupportedPlatform"
@@ -303,7 +287,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             // On Linux, Real mode is allowed (may succeed or fail with other error)
-            let _ = assemble(&cfg_with_mode(BackendMode::Real));
+            let _ = assemble(&cfg_with_mode(BackendMode::Real)).await;
         }
     }
 
