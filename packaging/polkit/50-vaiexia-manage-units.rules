@@ -1,0 +1,35 @@
+// VAIEXIA: grant the daemon user scoped systemd control (manage-units) with
+// verbs {start,stop,restart}, EXCEPT the units that form the daemon's own
+// privilege boundary. Everything else falls through to the polkit default
+// (denied for a non-admin system user). Spec §4 privilege separation.
+// Mode: DENYLIST — unlisted units/verbs fall through to the polkit DEFAULT.
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return undefined;
+    }
+    if (subject.user !== "vaiexia") {
+        return undefined;
+    }
+
+    var unit = action.lookup("unit") || "";
+    var denied = [
+        "vaiexia-server.service",
+        "vaiexia-privd.service",
+        "vaiexia-privd.socket",
+        "dbus.service",
+        "dbus.socket",
+        "polkit.service",
+        "systemd-logind.service",
+        "systemd-journald.service"
+    ];
+    if (denied.indexOf(unit) !== -1) {
+        return polkit.Result.NO;
+    }
+
+    var verb = action.lookup("verb") || "";
+    if (verb === "start" || verb === "stop" || verb === "restart") {
+        return polkit.Result.YES;
+    }
+    // enable/disable/mask/reload etc. fall through to the default (deny).
+    return undefined;
+});

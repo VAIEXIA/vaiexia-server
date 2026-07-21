@@ -1,0 +1,33 @@
+// OPTIONAL allowlist variant of the VAIEXIA polkit rule — for locked-down
+// deployments where the daemon may manage ONLY an enumerated set of units.
+// The shipped DEFAULT is the denylist rule (usability: manage anything except
+// the daemon's own privilege boundary). To switch (see INSTALL.md):
+//   1. edit `allowed` below to the exact unit files this host should expose,
+//   2. remove /etc/polkit-1/rules.d/50-vaiexia-manage-units.rules,
+//   3. install THIS file there WITHOUT the .example suffix.
+// Never list vaiexia-server.service / vaiexia-privd.* here — the daemon must
+// not manage its own privilege boundary in either mode.
+// Mode: ALLOWLIST — everything outside the list from the vaiexia user is an
+// explicit NO (unlike denylist mode, which falls through to the polkit DEFAULT).
+polkit.addRule(function (action, subject) {
+    if (action.id !== "org.freedesktop.systemd1.manage-units") {
+        return undefined;
+    }
+    if (subject.user !== "vaiexia") {
+        return undefined;
+    }
+
+    var allowed = [
+        // EDIT ME — e.g.:
+        "nginx.service",
+        "wg-quick@wg0.service"
+    ];
+    var unit = action.lookup("unit") || "";
+    var verb = action.lookup("verb") || "";
+    if (allowed.indexOf(unit) !== -1
+        && (verb === "start" || verb === "stop" || verb === "restart")) {
+        return polkit.Result.YES;
+    }
+    // Locked-down mode: everything else from the daemon user is an explicit NO.
+    return polkit.Result.NO;
+});
