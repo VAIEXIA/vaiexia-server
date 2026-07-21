@@ -90,7 +90,16 @@ pub trait IdentityStore: Send + Sync {
     fn snapshot(&self) -> Arc<IdentitySnapshot>;
     fn add_capability(&self, record: CapabilityRecord) -> Result<(), StoreError>;
     fn revoke_capability(&self, key_id: &str) -> Result<(), StoreError>;
+    /// Buffer the `last_used` timestamp for `key_id`. MUST NOT write to disk
+    /// (hot-path guarantee: one call per authenticated request). The persister
+    /// task periodically calls [`flush_last_used`] to commit the buffer.
     fn touch_last_used(&self, key_id: &str) -> Result<(), StoreError>;
+    /// Apply buffered `touch_last_used` timestamps to the snapshot and disk.
+    /// Returns the number of records updated. A no-op MUST NOT persist.
+    fn flush_last_used(&self) -> Result<usize, StoreError>;
+    /// Remove revoked capabilities and capabilities expired for longer than
+    /// `grace_secs`. Returns the number removed. A no-op MUST NOT persist.
+    fn prune_capabilities(&self, now_secs: u64, grace_secs: u64) -> Result<usize, StoreError>;
     fn add_account(&self, record: AccountRecord) -> Result<(), StoreError>;
     fn is_empty(&self) -> bool;
 }
@@ -114,6 +123,10 @@ pub struct FileStore {
     /// clobber each other (e.g. a `touch_last_used` racing a `revoke_capability`
     /// and silently un-revoking a token). Reads via `snapshot()` stay lock-free.
     write_lock: Mutex<()>,
+    /// Buffered last_used timestamps: key_id → unix-secs. Written by
+    /// `touch_last_used` (hot path — no disk I/O), flushed periodically by the
+    /// persister task via `flush_last_used`.
+    pending_touch: Mutex<HashMap<String, u64>>,
 }
 
 impl FileStore {
@@ -131,6 +144,7 @@ impl FileStore {
             path,
             snap: Arc::new(ArcSwap::from_pointee(snap)),
             write_lock: Mutex::new(()),
+            pending_touch: Mutex::new(HashMap::new()),
         })
     }
 
@@ -186,16 +200,59 @@ impl IdentityStore for FileStore {
     }
 
     fn touch_last_used(&self, key_id: &str) -> Result<(), StoreError> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        // Hot-path guarantee: buffer only, zero disk I/O. The persister task
+        // calls `flush_last_used` periodically to commit touches to disk.
+        self.pending_touch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key_id.to_string(), now_secs());
+        Ok(())
+    }
+
+    fn flush_last_used(&self) -> Result<usize, StoreError> {
+        let pending: HashMap<String, u64> = {
+            let mut guard = self.pending_touch.lock().unwrap_or_else(|e| e.into_inner());
+            std::mem::take(&mut *guard)
+        };
+        if pending.is_empty() {
+            return Ok(0);
+        }
+        let mut updated = 0usize;
         self.mutate(|s| {
-            if let Some(rec) = s.capabilities.get_mut(key_id) {
-                rec.last_used = Some(now);
+            for (key, ts) in &pending {
+                if let Some(rec) = s.capabilities.get_mut(key) {
+                    rec.last_used = Some(*ts);
+                    updated += 1;
+                }
+                // Key absent = already pruned; silently ignore (not an error).
             }
             Ok(())
-        })
+        })?;
+        Ok(updated)
+    }
+
+    fn prune_capabilities(&self, now: u64, grace: u64) -> Result<usize, StoreError> {
+        let removable = |rec: &CapabilityRecord| {
+            rec.revoked || rec.expires_at.is_some_and(|e| now >= e.saturating_add(grace))
+        };
+        // Cheap pre-scan on the lock-free snapshot: the common case (nothing to
+        // prune) takes no lock and writes nothing.
+        if !self.snap.load().capabilities.values().any(removable) {
+            return Ok(0);
+        }
+        let mut removed = 0usize;
+        self.mutate(|s| {
+            let before = s.capabilities.len();
+            s.capabilities.retain(|_, rec| !removable(rec));
+            removed = before - s.capabilities.len();
+            Ok(())
+        })?;
+        // Drop pending touches for pruned keys so a later flush can't resurrect them.
+        self.pending_touch
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|k, _| self.snap.load().capabilities.contains_key(k));
+        Ok(removed)
     }
 
     fn add_account(&self, record: AccountRecord) -> Result<(), StoreError> {
@@ -393,6 +450,7 @@ mod tests {
         let store = FileStore::open(&path).unwrap();
         store.add_capability(make_cap_record("aaaaaaaaaaaaaabb")).unwrap();
         store.touch_last_used("aaaaaaaaaaaaaabb").unwrap();
+        store.flush_last_used().unwrap();
         let snap = store.snapshot();
         let rec = snap.lookup_capability("aaaaaaaaaaaaaabb").unwrap();
         assert!(rec.last_used.is_some());
@@ -471,6 +529,7 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
+        store.flush_last_used().unwrap();
         let snap = store.snapshot();
         assert!(
             snap.lookup_capability("aaaaaaaaaaaaaabb").unwrap().revoked,
@@ -489,6 +548,89 @@ mod tests {
         let meta = fs::metadata(&path).unwrap();
         let mode = meta.permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "file must be 0600");
+        let _ = fs::remove_file(&path);
+    }
+
+    // ── S4-A3 helpers + tests ────────────────────────────────────────────────
+
+    fn rec(key_id: &str, created: u64, expires_at: Option<u64>, revoked: bool) -> CapabilityRecord {
+        CapabilityRecord {
+            key_id: key_id.to_string(),
+            secret_hash: [0u8; 32],
+            subject_id: "user:admin".to_string(),
+            scopes: vec!["server.read".to_string()],
+            label: "test".to_string(),
+            created_at: created,
+            expires_at,
+            revoked,
+            last_used: None,
+        }
+    }
+
+    #[test]
+    fn prune_removes_revoked_and_long_expired_keeps_live() {
+        let path = temp_path();
+        let store = FileStore::open(&path).unwrap();
+        let now = 1_000_000u64;
+        store.add_capability(rec("live000000000000", now, None, false)).unwrap();
+        store.add_capability(rec("revoked000000000", now, None, true)).unwrap();
+        store.add_capability(rec("old0000000000000", now, Some(now - 10_000), false)).unwrap();
+        store.add_capability(rec("freshexp00000000", now, Some(now - 10), false)).unwrap();
+
+        let removed = store.prune_capabilities(now, 3_600).unwrap();
+        assert_eq!(removed, 2);
+        let snap = store.snapshot();
+        assert!(snap.lookup_capability("live000000000000").is_some());
+        assert!(snap.lookup_capability("freshexp00000000").is_some(), "within grace → kept");
+        assert!(snap.lookup_capability("revoked000000000").is_none());
+        assert!(snap.lookup_capability("old0000000000000").is_none());
+        // Pruning persisted: survives re-open.
+        let store2 = FileStore::open(&path).unwrap();
+        assert!(store2.snapshot().lookup_capability("revoked000000000").is_none());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prune_with_nothing_to_do_does_not_rewrite_the_file() {
+        let path = temp_path();
+        let store = FileStore::open(&path).unwrap();
+        store.add_capability(rec("live000000000000", 100, None, false)).unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(store.prune_capabilities(200, 3_600).unwrap(), 0);
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before, "no-op prune must not persist");
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn touch_last_used_is_buffered_not_persisted() {
+        let path = temp_path();
+        let store = FileStore::open(&path).unwrap();
+        store.add_capability(make_cap_record("aaaaaaaaaaaaaabb")).unwrap();
+        let before = fs::metadata(&path).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        for _ in 0..100 {
+            store.touch_last_used("aaaaaaaaaaaaaabb").unwrap();
+        }
+        // ZERO disk writes on the touch path (verifier hot-path guarantee).
+        assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), before);
+        // Flush applies and persists.
+        assert_eq!(store.flush_last_used().unwrap(), 1);
+        let store2 = FileStore::open(&path).unwrap();
+        assert!(store2.snapshot().lookup_capability("aaaaaaaaaaaaaabb").unwrap().last_used.is_some());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn flush_last_used_ignores_keys_pruned_meanwhile() {
+        let path = temp_path();
+        let store = FileStore::open(&path).unwrap();
+        store.add_capability(rec("gone000000000000", 100, None, true)).unwrap();
+        store.touch_last_used("gone000000000000").unwrap();
+        store.prune_capabilities(200, 0).unwrap();
+        // Flush of a since-pruned key must not resurrect or error.
+        assert_eq!(store.flush_last_used().unwrap(), 0);
+        assert!(store.snapshot().lookup_capability("gone000000000000").is_none());
         let _ = fs::remove_file(&path);
     }
 }

@@ -9,3 +9,4 @@ pub mod ratelimit;
 pub mod verifier;
 pub use verifier::DaemonVerifier;
 pub mod bootstrap;
+pub mod persister;
