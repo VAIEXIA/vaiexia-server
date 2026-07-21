@@ -11,7 +11,7 @@ use crate::config::model::{BackendMode, ServerConfig};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssembleError {
-    #[error("real backends require Linux; this platform is not supported")]
+    #[error("no native backend is available for this platform")]
     UnsupportedPlatform,
 }
 
@@ -46,13 +46,10 @@ fn assemble_mock() -> SystemBackend {
 async fn assemble_auto() -> SystemBackend {
     let metrics = Arc::new(SysinfoMetrics::new()) as Arc<dyn crate::backend::MetricsProvider>;
 
-    // On Linux, real service/log/package providers are probed at startup.
-    // Off-Linux (Windows, macOS) they are None — graceful degradation.
-    #[cfg(target_os = "linux")]
-    let (services, packages, logs) = assemble_linux_providers_auto().await;
-
-    #[cfg(not(target_os = "linux"))]
-    let (services, packages, logs) = (None, None, None);
+    // Platform dispatch goes through a single seam. On Linux, real
+    // service/log/package providers are probed at startup. On all other
+    // platforms they are None — graceful degradation.
+    let (services, packages, logs) = assemble_native_providers().await;
 
     let caps = probe::derive_capabilities(
         services.is_some(),
@@ -87,7 +84,7 @@ async fn assemble_real() -> Result<SystemBackend, AssembleError> {
     #[cfg(target_os = "linux")]
     {
         let metrics = Arc::new(SysinfoMetrics::new()) as Arc<dyn crate::backend::MetricsProvider>;
-        let (services, packages, logs) = assemble_linux_providers_auto().await;
+        let (services, packages, logs) = assemble_native_providers().await;
 
         let caps = probe::derive_capabilities(
             services.is_some(),
@@ -111,8 +108,34 @@ async fn assemble_real() -> Result<SystemBackend, AssembleError> {
     }
 }
 
+// ── Platform seam ─────────────────────────────────────────────────────────────
+//
+// `assemble_native_providers` is the single dispatch point for platform-specific
+// optional providers. Adding a future `#[cfg(windows)]` backend means adding a
+// new function/file and a new arm here — no surgery on existing platform logic.
+
 #[cfg(target_os = "linux")]
-async fn assemble_linux_providers_auto() -> (
+async fn assemble_native_providers() -> (
+    Option<Arc<dyn crate::backend::ServiceManager>>,
+    Option<Arc<dyn crate::backend::PackageManager>>,
+    Option<Arc<dyn crate::backend::LogProvider>>,
+) {
+    assemble_linux_providers().await
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn assemble_native_providers() -> (
+    Option<Arc<dyn crate::backend::ServiceManager>>,
+    Option<Arc<dyn crate::backend::PackageManager>>,
+    Option<Arc<dyn crate::backend::LogProvider>>,
+) {
+    (None, None, None)
+}
+
+// ── Linux backend ─────────────────────────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+async fn assemble_linux_providers() -> (
     Option<Arc<dyn crate::backend::ServiceManager>>,
     Option<Arc<dyn crate::backend::PackageManager>>,
     Option<Arc<dyn crate::backend::LogProvider>>,
