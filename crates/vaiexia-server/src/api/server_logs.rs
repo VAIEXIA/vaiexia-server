@@ -37,11 +37,10 @@ pub async fn logs_query_result(
         return Err(Diagnostic::error(codes::INVALID_PARAMS, "limit must be > 0"));
     }
 
-    // Validate the unit filter through the UnitName newtype. It is passed to
-    // `journalctl -u <unit>`; even though it is an option-argument (not itself
-    // option-injectable), an unvalidated value would permit journalctl glob
-    // patterns like `*` (match every unit) and arbitrary junk. Rejecting here
-    // enforces the "validated newtype" contract build_argv documents.
+    // Validate the unit filter through the UnitName newtype (platform-neutral
+    // hygiene: non-empty, ≤ 256 bytes, no NUL / control chars / path
+    // separators). Systemd-specific rules (charset, known suffixes) are
+    // enforced inside the systemd backend before the name reaches journalctl.
     if params
         .unit
         .as_deref()
@@ -144,9 +143,13 @@ mod tests {
         assert_eq!(err.code, codes::INVALID_PARAMS);
     }
 
+    // `*` is a single printable ASCII character — it passes the generic
+    // platform-neutral hygiene check (no control chars, no path separators).
+    // The journalctl glob-expansion concern is now addressed at the systemd
+    // backend boundary (via SystemdUnitName charset validation), not here.
+    // The mock backend simply returns an empty page for an unknown unit name.
     #[tokio::test]
-    async fn logs_query_rejects_glob_unit() {
-        // journalctl -u accepts globs; `*` must be rejected by UnitName validation.
+    async fn logs_query_glob_unit_passes_generic_hygiene() {
         let be = full_backend();
         let params = LogsQueryParams {
             unit: Some("*".into()),
@@ -155,8 +158,40 @@ mod tests {
             limit: 10,
             cursor: None,
         };
+        // Generic API layer now accepts `*`; mock returns an empty result set.
+        let page = logs_query_result(&be, params).await.unwrap();
+        assert!(page.items.is_empty());
+    }
+
+    // Control characters must still be rejected at the generic API layer.
+    #[tokio::test]
+    async fn logs_query_rejects_control_char_unit() {
+        let be = full_backend();
+        let params = LogsQueryParams {
+            unit: Some("foo\x01bar".into()),
+            since: None,
+            until: None,
+            limit: 10,
+            cursor: None,
+        };
         let err = logs_query_result(&be, params).await.unwrap_err();
         assert_eq!(err.code, codes::INVALID_PARAMS);
+    }
+
+    // A `$`-containing name (Windows SCM style) must pass the generic API layer.
+    #[tokio::test]
+    async fn logs_query_dollar_unit_passes_generic_hygiene() {
+        let be = full_backend();
+        let params = LogsQueryParams {
+            unit: Some("MSSQL$SQLEXPRESS".into()),
+            since: None,
+            until: None,
+            limit: 10,
+            cursor: None,
+        };
+        // No INVALID_PARAMS at the API layer; mock returns empty (no such unit).
+        let page = logs_query_result(&be, params).await.unwrap();
+        assert!(page.items.is_empty());
     }
 
     #[tokio::test]

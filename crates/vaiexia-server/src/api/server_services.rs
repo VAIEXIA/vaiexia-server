@@ -361,12 +361,28 @@ mod tests {
         assert_eq!(err.code, "NOT_FOUND");
     }
 
+    // "a b.service" has a space (0x20) which passes the generic platform-neutral
+    // hygiene check (no NUL / control chars / path separators). The API layer
+    // accepts it; the mock backend returns NOT_FOUND because no unit matches.
+    // Systemd-charset rejection ("a b" contains a space) is now enforced inside
+    // the systemd backend, not in the generic API layer.
     #[tokio::test]
-    async fn services_status_invalid_params_for_bad_name() {
+    async fn services_status_space_name_passes_generic_hygiene_not_found() {
         let be = full_backend();
         let params = ServiceStatusParams { name: "a b.service".into() };
         let err = service_status_result(&be, params).await.unwrap_err();
-        assert_eq!(err.code, vaiexia_core::diagnostic::codes::INVALID_PARAMS);
+        assert_eq!(err.code, "NOT_FOUND");
+    }
+
+    // A name with a `$` sign (e.g. Windows SCM `MSSQL$SQLEXPRESS`) must now pass
+    // the generic API hygiene check. The mock backend will return NOT_FOUND
+    // (no such unit exists) — but no INVALID_PARAMS at the API boundary.
+    #[tokio::test]
+    async fn services_status_dollar_name_passes_generic_hygiene() {
+        let be = full_backend();
+        let params = ServiceStatusParams { name: "MSSQL$SQLEXPRESS".into() };
+        let err = service_status_result(&be, params).await.unwrap_err();
+        assert_eq!(err.code, "NOT_FOUND");
     }
 
     #[tokio::test]
@@ -412,11 +428,34 @@ mod tests {
         assert_eq!(dto.state, crate::backend::ServiceState::Active);
     }
 
+    // "a b.service" passes generic API hygiene (space is not a control char /
+    // path separator / NUL). The systemd-specific charset check is now at the
+    // backend boundary. The mock returns NOT_FOUND.
     #[tokio::test]
-    async fn services_start_invalid_name_returns_invalid_params() {
+    async fn services_start_space_name_passes_generic_hygiene_not_found() {
         let be = full_backend();
         let subj = noop_subject();
         let params = ServiceMutateParams { name: "a b.service".into() };
+        let err = services_start_result(&be, &crate::audit::noop(), &subj, params).await.unwrap_err();
+        assert_eq!(err.code, "NOT_FOUND");
+    }
+
+    // Control characters must still be rejected at the generic API layer.
+    #[tokio::test]
+    async fn services_start_control_char_returns_invalid_params() {
+        let be = full_backend();
+        let subj = noop_subject();
+        let params = ServiceMutateParams { name: "foo\x01bar".into() };
+        let err = services_start_result(&be, &crate::audit::noop(), &subj, params).await.unwrap_err();
+        assert_eq!(err.code, vaiexia_core::diagnostic::codes::INVALID_PARAMS);
+    }
+
+    // Path separators must still be rejected at the generic API layer.
+    #[tokio::test]
+    async fn services_start_path_sep_returns_invalid_params() {
+        let be = full_backend();
+        let subj = noop_subject();
+        let params = ServiceMutateParams { name: "../etc/shadow".into() };
         let err = services_start_result(&be, &crate::audit::noop(), &subj, params).await.unwrap_err();
         assert_eq!(err.code, vaiexia_core::diagnostic::codes::INVALID_PARAMS);
     }

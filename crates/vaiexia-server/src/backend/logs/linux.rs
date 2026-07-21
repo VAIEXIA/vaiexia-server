@@ -7,6 +7,7 @@ use tokio::sync::broadcast;
 
 use crate::backend::capped::{read_line_capped, run_capped};
 use crate::backend::{BackendError, LogEntry, LogProvider, LogQuery, Page};
+use crate::backend::systemd::unit::validate as validate_systemd_unit;
 use super::journald::{build_argv, parse_journal_line};
 
 /// Maximum bytes to read from journalctl stdout (per query). The child is
@@ -115,6 +116,14 @@ async fn follow_journal(tx: broadcast::Sender<LogEntry>) {
 #[async_trait]
 impl LogProvider for JournaldLogs {
     async fn query(&self, q: &LogQuery) -> Result<Page<LogEntry>, BackendError> {
+        // Enforce systemd-specific unit name rules before the name reaches
+        // journalctl. The generic API layer ensures no control chars / path
+        // separators; here we additionally reject names that fall outside the
+        // systemd charset (e.g. `*` which journalctl treats as a glob).
+        if let Some(ref unit) = q.unit {
+            validate_systemd_unit(unit).map_err(|_| BackendError::InvalidName)?;
+        }
+
         let argv = build_argv(q);
         let program = argv[0].clone();
         let args = &argv[1..];
