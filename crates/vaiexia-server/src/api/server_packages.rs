@@ -6,7 +6,7 @@ use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 use vaiexia_priv_proto::PackageName;
 
-use crate::api::dto::{PackageDto, PageDto};
+use crate::api::{ApiDeps, ScopeAudit, dto::{PackageDto, PageDto}};
 use crate::api::jobs::JobRegistry;
 use crate::api::register_scoped;
 use crate::backend::SystemBackend;
@@ -99,31 +99,55 @@ pub async fn packages_remove_result(
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
-pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>, registry: Arc<JobRegistry>) -> ServiceBuilder {
+pub fn register(builder: ServiceBuilder, deps: &ApiDeps, registry: Arc<JobRegistry>) -> ServiceBuilder {
+    let be = Arc::clone(&deps.backend);
+    let audit = deps.audit.clone();
+
     let be1 = Arc::clone(&be);
+    let audit1 = audit.clone();
     let list_method = Method::new("server.packages.list").expect("valid method");
-    let builder = register_scoped(builder, list_method, move |p: PackagesListParams, _subject: Subject| {
-        let be = Arc::clone(&be1);
-        async move { packages_list_result(&be, p).await }
-    });
+    let builder = register_scoped(
+        builder,
+        list_method,
+        audit1,
+        ScopeAudit::DenyOnly,
+        move |p: PackagesListParams, _subject: Subject| {
+            let be = Arc::clone(&be1);
+            async move { packages_list_result(&be, p).await }
+        },
+    );
 
     let be2 = Arc::clone(&be);
+    let audit2 = audit.clone();
     let reg2 = Arc::clone(&registry);
     let install_method = Method::new("server.packages.install").expect("valid method");
-    let builder = register_scoped(builder, install_method, move |p: PackageMutateParams, _subject: Subject| {
-        let be = Arc::clone(&be2);
-        let reg = Arc::clone(&reg2);
-        async move { packages_install_result(&be, &reg, p).await }
-    });
+    let builder = register_scoped(
+        builder,
+        install_method,
+        audit2,
+        ScopeAudit::DenyOnly,
+        move |p: PackageMutateParams, _subject: Subject| {
+            let be = Arc::clone(&be2);
+            let reg = Arc::clone(&reg2);
+            async move { packages_install_result(&be, &reg, p).await }
+        },
+    );
 
     let be3 = Arc::clone(&be);
+    let audit3 = audit.clone();
     let reg3 = Arc::clone(&registry);
     let remove_method = Method::new("server.packages.remove").expect("valid method");
-    register_scoped(builder, remove_method, move |p: PackageMutateParams, _subject: Subject| {
-        let be = Arc::clone(&be3);
-        let reg = Arc::clone(&reg3);
-        async move { packages_remove_result(&be, &reg, p).await }
-    })
+    register_scoped(
+        builder,
+        remove_method,
+        audit3,
+        ScopeAudit::DenyOnly,
+        move |p: PackageMutateParams, _subject: Subject| {
+            let be = Arc::clone(&be3);
+            let reg = Arc::clone(&reg3);
+            async move { packages_remove_result(&be, &reg, p).await }
+        },
+    )
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ use vaiexia_core::diagnostic::Diagnostic;
 use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 
+use crate::api::{ApiDeps, ScopeAudit};
 use crate::api::jobs::{JobRegistry, JobStatus};
 use crate::api::register_scoped;
 use crate::diag::domain_codes;
@@ -29,12 +30,18 @@ pub fn jobs_status_result(
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
-pub fn register(builder: ServiceBuilder, registry: Arc<JobRegistry>) -> ServiceBuilder {
+pub fn register(builder: ServiceBuilder, deps: &ApiDeps, registry: Arc<JobRegistry>) -> ServiceBuilder {
     let status_method = Method::new("server.jobs.status").expect("valid method");
-    register_scoped(builder, status_method, move |p: JobsStatusParams, _subject: Subject| {
-        let registry = Arc::clone(&registry);
-        async move { jobs_status_result(&registry, p) }
-    })
+    register_scoped(
+        builder,
+        status_method,
+        deps.audit.clone(),
+        ScopeAudit::DenyOnly,
+        move |p: JobsStatusParams, _subject: Subject| {
+            let registry = Arc::clone(&registry);
+            async move { jobs_status_result(&registry, p) }
+        },
+    )
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

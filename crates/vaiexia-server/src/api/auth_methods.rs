@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use vaiexia_core::auth::Subject;
@@ -6,13 +7,13 @@ use vaiexia_core::diagnostic::{codes, Diagnostic};
 use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 
-use crate::api::{ApiModule, register_scoped};
+use crate::api::{ApiDeps, ScopeAudit, register_scoped};
+use crate::audit::{AuditDecision, AuditEvent, AuditKind, DynAuditSink, reason};
 use crate::auth::bootstrap::BootstrapState;
 use crate::auth::password::verify_password;
 use crate::auth::ratelimit::{RateLimiter, RateLimited};
 use crate::auth::store::{CapabilityRecord, IdentityStore, now_secs};
 use crate::auth::token;
-use crate::backend::SystemBackend;
 use crate::diag::domain_codes;
 
 // ── AuthModule ────────────────────────────────────────────────────────────────
@@ -23,37 +24,46 @@ pub struct AuthModule {
     pub bootstrap: Arc<Mutex<BootstrapState>>,
 }
 
-impl ApiModule for AuthModule {
-    fn register(self: Box<Self>, builder: ServiceBuilder, _backend: Arc<SystemBackend>) -> ServiceBuilder {
+impl crate::api::ApiModule for AuthModule {
+    fn register(self: Box<Self>, builder: ServiceBuilder, deps: &ApiDeps) -> ServiceBuilder {
         let store = Arc::clone(&self.store);
         let ratelimit = Arc::clone(&self.ratelimit);
         let bootstrap = Arc::clone(&self.bootstrap);
+        let audit = deps.audit.clone();
 
         // auth.bootstrap.claim  (Anonymous)
         let store1 = Arc::clone(&store);
         let boot1 = Arc::clone(&bootstrap);
+        let audit1 = audit.clone();
         let claim_method = Method::new("auth.bootstrap.claim").expect("valid method");
         let builder = register_scoped(
             builder,
             claim_method,
+            audit.clone(),
+            ScopeAudit::DenyOnly,
             move |p: BootstrapClaimParams, _subject: Subject| {
                 let store = Arc::clone(&store1);
                 let bootstrap = Arc::clone(&boot1);
-                async move { bootstrap_claim(p, store, bootstrap).await }
+                let audit = audit1.clone();
+                async move { bootstrap_claim(p, store, bootstrap, audit).await }
             },
         );
 
         // auth.login  (Anonymous)
         let store2 = Arc::clone(&store);
         let rl2 = Arc::clone(&ratelimit);
+        let audit2 = audit.clone();
         let login_method = Method::new("auth.login").expect("valid method");
         let builder = register_scoped(
             builder,
             login_method,
+            audit.clone(),
+            ScopeAudit::DenyOnly,
             move |p: LoginParams, _subject: Subject| {
                 let store = Arc::clone(&store2);
                 let rl = Arc::clone(&rl2);
-                async move { login(p, store, rl).await }
+                let audit = audit2.clone();
+                async move { login(p, store, rl, audit).await }
             },
         );
 
@@ -63,6 +73,8 @@ impl ApiModule for AuthModule {
         let builder = register_scoped(
             builder,
             whoami_method,
+            audit.clone(),
+            ScopeAudit::DenyOnly,
             move |_p: WhoamiParams, subject: Subject| {
                 let store = Arc::clone(&store3);
                 async move { whoami(subject, store).await }
@@ -71,13 +83,17 @@ impl ApiModule for AuthModule {
 
         // auth.token.create  (auth.admin scope)
         let store4 = Arc::clone(&store);
+        let audit4 = audit.clone();
         let token_create_method = Method::new("auth.token.create").expect("valid method");
         let builder = register_scoped(
             builder,
             token_create_method,
+            audit.clone(),
+            ScopeAudit::DenyOnly,
             move |p: TokenCreateParams, subject: Subject| {
                 let store = Arc::clone(&store4);
-                async move { token_create(p, subject, store).await }
+                let audit = audit4.clone();
+                async move { token_create(p, subject, store, audit).await }
             },
         );
 
@@ -87,6 +103,8 @@ impl ApiModule for AuthModule {
         let builder = register_scoped(
             builder,
             token_list_method,
+            audit.clone(),
+            ScopeAudit::DenyOnly,
             move |_p: TokenListParams, _subject: Subject| {
                 let store = Arc::clone(&store5);
                 async move { token_list(store).await }
@@ -95,13 +113,17 @@ impl ApiModule for AuthModule {
 
         // auth.token.revoke  (auth.admin scope)
         let store6 = Arc::clone(&store);
+        let audit6 = audit.clone();
         let token_revoke_method = Method::new("auth.token.revoke").expect("valid method");
         register_scoped(
             builder,
             token_revoke_method,
-            move |p: TokenRevokeParams, _subject: Subject| {
+            audit,
+            ScopeAudit::DenyOnly,
+            move |p: TokenRevokeParams, subject: Subject| {
                 let store = Arc::clone(&store6);
-                async move { token_revoke(p, store).await }
+                let audit = audit6.clone();
+                async move { token_revoke(p, subject, store, audit).await }
             },
         )
     }
@@ -187,6 +209,7 @@ async fn bootstrap_claim(
     p: BootstrapClaimParams,
     store: Arc<dyn IdentityStore>,
     bootstrap: Arc<Mutex<BootstrapState>>,
+    audit: DynAuditSink,
 ) -> Result<BootstrapClaimResponse, Diagnostic> {
     let mut guard = bootstrap.lock().map_err(|_| {
         Diagnostic::error(codes::INTERNAL, "bootstrap lock poisoned")
@@ -197,17 +220,44 @@ async fn bootstrap_claim(
             use crate::auth::bootstrap::BootstrapError;
             match e {
                 BootstrapError::Disabled => {
+                    audit.emit(
+                        AuditEvent::new(AuditKind::Bootstrap, AuditDecision::Deny, "anonymous")
+                            .with_detail("bootstrap is disabled; server already initialised"),
+                    );
                     Diagnostic::error("BOOTSTRAP_DISABLED", "bootstrap is disabled; server already initialised")
                 }
                 BootstrapError::BadCode => {
+                    audit.emit(
+                        AuditEvent::new(AuditKind::Bootstrap, AuditDecision::Deny, "anonymous")
+                            .with_detail("incorrect bootstrap code"),
+                    );
                     Diagnostic::error(codes::FORBIDDEN, "incorrect bootstrap code")
                 }
                 BootstrapError::RateLimited => {
+                    // Rate limit trip: emit RateLimit (security) instead of Bootstrap deny.
+                    audit.emit(
+                        AuditEvent::new(AuditKind::RateLimit, AuditDecision::Deny, "anonymous")
+                            .with_method("auth.bootstrap.claim")
+                            .with_reason(reason::RATE_LIMITED),
+                    );
                     Diagnostic::error("RATE_LIMIT", "too many failed attempts; bootstrap code regenerated")
                 }
-                e => Diagnostic::error(codes::INTERNAL, e.to_string()),
+                e => {
+                    audit.emit(
+                        AuditEvent::new(AuditKind::Bootstrap, AuditDecision::Err, "anonymous")
+                            .with_detail(format!("internal: {e}")),
+                    );
+                    Diagnostic::error(codes::INTERNAL, e.to_string())
+                }
             }
         })?;
+
+    // Success — emit Bootstrap Allow (NEVER include the returned capability/secret).
+    audit.emit(
+        AuditEvent::new(AuditKind::Bootstrap, AuditDecision::Allow, &result.subject_id)
+            .with_detail(format!("admin={} scopes={:?}", p.admin_name, result.scopes)),
+    );
+
     Ok(BootstrapClaimResponse {
         capability: result.capability.reveal().to_string(),
         subject_id: result.subject_id,
@@ -219,15 +269,30 @@ async fn login(
     p: LoginParams,
     store: Arc<dyn IdentityStore>,
     ratelimit: Arc<RateLimiter>,
+    audit: DynAuditSink,
 ) -> Result<LoginResponse, Diagnostic> {
+    let t0 = Instant::now();
+
     // Rate limit by account name.
     ratelimit.check(&p.name).map_err(|RateLimited { retry_after_secs }| {
+        // Rate-limit trip: emit RateLimit (security) instead of AuthDecision deny.
+        audit.emit(
+            AuditEvent::new(AuditKind::RateLimit, AuditDecision::Deny, "anonymous")
+                .with_method("auth.login")
+                .with_reason(reason::RATE_LIMITED),
+        );
         Diagnostic::error("RATE_LIMIT", format!("too many attempts; retry after {retry_after_secs}s"))
     })?;
 
     let snap = store.snapshot();
     let acc = snap.lookup_account(&p.name).ok_or_else(|| {
         // Return same error as wrong password (avoid user enumeration).
+        audit.emit(
+            AuditEvent::new(AuditKind::AuthDecision, AuditDecision::Deny, "anonymous")
+                .with_method("auth.login")
+                .with_reason(reason::UNKNOWN_ACCOUNT)
+                .with_latency_us(t0.elapsed().as_micros() as u64),
+        );
         Diagnostic::error(codes::UNAUTHENTICATED, "invalid credentials")
     })?;
 
@@ -236,6 +301,12 @@ async fn login(
     })?;
 
     if !ok {
+        audit.emit(
+            AuditEvent::new(AuditKind::AuthDecision, AuditDecision::Deny, "anonymous")
+                .with_method("auth.login")
+                .with_reason(reason::BAD_PASSWORD)
+                .with_latency_us(t0.elapsed().as_micros() as u64),
+        );
         return Err(Diagnostic::error(codes::UNAUTHENTICATED, "invalid credentials"));
     }
 
@@ -269,6 +340,17 @@ async fn login(
 
     // Reset rate limit on success.
     ratelimit.reset(&p.name);
+
+    // Emit AuthDecision Allow. The audit record carries key_id (handle) and
+    // subject_id (human), NEVER the secret portion of the capability.
+    let latency = t0.elapsed().as_micros() as u64;
+    audit.emit(
+        AuditEvent::new(AuditKind::AuthDecision, AuditDecision::Allow, &acc.subject_id)
+            .with_method("auth.login")
+            .with_cap_key_id(&minted.key_id)
+            .with_reason(reason::OK)
+            .with_latency_us(latency),
+    );
 
     Ok(LoginResponse {
         capability: minted.capability.reveal().to_string(),
@@ -307,7 +389,10 @@ async fn token_create(
     p: TokenCreateParams,
     subject: Subject,
     store: Arc<dyn IdentityStore>,
+    audit: DynAuditSink,
 ) -> Result<TokenCreateResponse, Diagnostic> {
+    let t0 = Instant::now();
+
     // Validate scopes are non-empty.
     if p.scopes.is_empty() {
         return Err(Diagnostic::error(codes::INVALID_PARAMS, "scopes must not be empty"));
@@ -337,15 +422,28 @@ async fn token_create(
         .add_capability(CapabilityRecord {
             key_id: minted.key_id.clone(),
             secret_hash: minted.secret_hash,
-            subject_id,
+            subject_id: subject_id.clone(),
             scopes: p.scopes.clone(),
-            label: p.label,
+            label: p.label.clone(),
             created_at: now_secs(),
             expires_at,
             revoked: false,
             last_used: None,
         })
         .map_err(|e| Diagnostic::error(codes::INTERNAL, e.to_string()))?;
+
+    let latency = t0.elapsed().as_micros() as u64;
+    // NEVER include the secret in the audit detail — key_id is the loggable handle.
+    audit.emit(
+        AuditEvent::new(AuditKind::Mutation, AuditDecision::Ok, &subject_id)
+            .with_method("auth.token.create")
+            .with_cap_key_id(&minted.key_id)
+            .with_detail(format!(
+                "created={} label={} scopes={:?}",
+                minted.key_id, p.label, p.scopes
+            ))
+            .with_latency_us(latency),
+    );
 
     Ok(TokenCreateResponse {
         capability: minted.capability.reveal().to_string(),
@@ -390,15 +488,45 @@ async fn token_list(store: Arc<dyn IdentityStore>) -> Result<Vec<TokenMetadata>,
 
 async fn token_revoke(
     p: TokenRevokeParams,
+    subject: Subject,
     store: Arc<dyn IdentityStore>,
+    audit: DynAuditSink,
 ) -> Result<serde_json::Value, Diagnostic> {
-    store.revoke_capability(&p.key_id).map_err(|e| {
+    let t0 = Instant::now();
+    let key_id = p.key_id.clone();
+    let result = store.revoke_capability(&key_id).map_err(|e| {
         use crate::auth::store::StoreError;
         match e {
             StoreError::NotFound(k) => Diagnostic::error(domain_codes::NOT_FOUND, format!("capability not found: {k}")),
             e => Diagnostic::error(codes::INTERNAL, e.to_string()),
         }
-    })?;
+    });
+
+    let latency = t0.elapsed().as_micros() as u64;
+    match &result {
+        Ok(_) => {
+            let subject_id = resolve_owner_subject_id(&subject, &store);
+            audit.emit(
+                AuditEvent::new(AuditKind::Mutation, AuditDecision::Ok, &subject_id)
+                    .with_method("auth.token.revoke")
+                    .with_cap_key_id(&key_id)
+                    .with_reason(reason::REVOKED)
+                    .with_detail(format!("revoked={key_id}"))
+                    .with_latency_us(latency),
+            );
+        }
+        Err(_) => {
+            let subject_id = resolve_owner_subject_id(&subject, &store);
+            audit.emit(
+                AuditEvent::new(AuditKind::Mutation, AuditDecision::Err, &subject_id)
+                    .with_method("auth.token.revoke")
+                    .with_detail(format!("revoke_failed={key_id}"))
+                    .with_latency_us(latency),
+            );
+        }
+    }
+
+    result?;
     Ok(serde_json::json!({}))
 }
 
@@ -447,7 +575,7 @@ mod tests {
             requested_scopes: None,
             ttl: None,
         };
-        let resp = login(params, Arc::clone(&store), rl).await.unwrap();
+        let resp = login(params, Arc::clone(&store), rl, crate::audit::noop()).await.unwrap();
         assert!(!resp.capability.is_empty());
         assert!(resp.scopes.contains(&"server.read".to_string()));
         let _ = std::fs::remove_file(&path);
@@ -465,7 +593,7 @@ mod tests {
             requested_scopes: None,
             ttl: None,
         };
-        let err = login(params, store, rl).await.unwrap_err();
+        let err = login(params, store, rl, crate::audit::noop()).await.unwrap_err();
         assert_eq!(err.code, codes::UNAUTHENTICATED);
         let _ = std::fs::remove_file(&path);
     }
@@ -482,7 +610,7 @@ mod tests {
             requested_scopes: Some(vec!["server.read".into(), "vpn.admin".into()]),
             ttl: None,
         };
-        let resp = login(params, store, rl).await.unwrap();
+        let resp = login(params, store, rl, crate::audit::noop()).await.unwrap();
         // vpn.admin not in account scopes → filtered out
         assert!(!resp.scopes.contains(&"vpn.admin".to_string()));
         assert!(resp.scopes.contains(&"server.read".to_string()));
@@ -503,7 +631,7 @@ mod tests {
             scopes: vec!["server.read".into()],
             ttl: Some(3600),
         };
-        let resp = token_create(params, subject, Arc::clone(&store)).await.unwrap();
+        let resp = token_create(params, subject, Arc::clone(&store), crate::audit::noop()).await.unwrap();
         assert!(!resp.capability.is_empty());
         assert_eq!(resp.scopes, vec!["server.read"]);
         let _ = std::fs::remove_file(&path);
@@ -549,7 +677,7 @@ mod tests {
             scopes: vec!["server.services.write".into()],
             ttl: None,
         };
-        let err = token_create(params, subject, Arc::clone(&store)).await.unwrap_err();
+        let err = token_create(params, subject, Arc::clone(&store), crate::audit::noop()).await.unwrap_err();
         assert_eq!(err.code, codes::FORBIDDEN, "must not mint scope caller lacks");
         // Nothing was persisted.
         assert!(store.snapshot().capabilities.is_empty());
@@ -582,7 +710,7 @@ mod tests {
             scopes: vec!["server.read".into()],
             ttl: None,
         };
-        let resp = token_create(params, subject, Arc::clone(&store)).await.unwrap();
+        let resp = token_create(params, subject, Arc::clone(&store), crate::audit::noop()).await.unwrap();
         let snap = store.snapshot();
         let rec = snap.lookup_capability(&resp.key_id).unwrap();
         assert_eq!(
@@ -632,8 +760,12 @@ mod tests {
             revoked: false,
             last_used: None,
         }).unwrap();
+        let subject = Subject {
+            id: vaiexia_core::auth::SubjectId::new("cap:dummy"),
+            scopes: vaiexia_core::auth::ScopeSet::from_iter::<[&str; 0]>([]),
+        };
         let params = TokenRevokeParams { key_id: minted.key_id.clone() };
-        token_revoke(params, Arc::clone(&store)).await.unwrap();
+        token_revoke(params, subject, Arc::clone(&store), crate::audit::noop()).await.unwrap();
         let snap = store.snapshot();
         assert!(snap.lookup_capability(&minted.key_id).unwrap().revoked);
         let _ = std::fs::remove_file(&path);
@@ -655,7 +787,7 @@ mod tests {
             admin_name: "admin".into(),
             password: "hunter2".into(),
         };
-        let resp = bootstrap_claim(params, Arc::clone(&store), boot).await.unwrap();
+        let resp = bootstrap_claim(params, Arc::clone(&store), boot, crate::audit::noop()).await.unwrap();
         assert!(!resp.capability.is_empty());
         assert_eq!(resp.subject_id, "user:admin");
         assert!(resp.scopes.contains(&"auth.admin".to_string()));

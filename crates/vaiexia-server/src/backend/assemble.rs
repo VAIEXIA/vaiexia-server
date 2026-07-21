@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crate::audit::DynAuditSink;
 use crate::backend::{
     SystemBackend,
     metrics::SysinfoMetrics,
@@ -22,10 +23,14 @@ pub enum AssembleError {
 ///   probed and degrades to `None` (→ UNSUPPORTED at the API) on failure.
 /// - `Real` → like Auto but off-Linux → `Err(AssembleError::UnsupportedPlatform)`.
 ///
+/// `audit` is threaded into the privd-backed `PackageManager` provider (on
+/// Linux). Mock and non-privd providers ignore it. Pass `audit::noop()` in
+/// tests.
+///
 /// Async: must be called from within the daemon's tokio runtime. The Linux
 /// providers spawn long-lived background tasks (systemd watch, journald
 /// follow) which must land on the runtime that outlives assembly.
-pub async fn assemble(cfg: &ServerConfig) -> Result<SystemBackend, AssembleError> {
+pub async fn assemble(cfg: &ServerConfig, _audit: DynAuditSink) -> Result<SystemBackend, AssembleError> {
     match cfg.backend.mode {
         BackendMode::Mock => Ok(assemble_mock()),
         BackendMode::Auto => Ok(assemble_auto().await),
@@ -208,6 +213,8 @@ mod tests {
         }
     }
 
+    fn noop() -> crate::audit::DynAuditSink { crate::audit::noop() }
+
     #[test]
     fn backend_mode_default_is_auto() {
         let cfg = BackendCfg::default();
@@ -217,7 +224,7 @@ mod tests {
     #[tokio::test]
     async fn assemble_mock_mode_gives_all_caps_true() {
         let cfg = cfg_with_mode(BackendMode::Mock);
-        let backend = assemble(&cfg).await.expect("mock assemble should succeed");
+        let backend = assemble(&cfg, noop()).await.expect("mock assemble should succeed");
         assert!(backend.caps.services, "mock caps.services must be true");
         assert!(backend.caps.packages, "mock caps.packages must be true");
         assert!(backend.caps.metrics, "mock caps.metrics must be true");
@@ -227,7 +234,7 @@ mod tests {
     #[tokio::test]
     async fn assemble_mock_mode_providers_all_present() {
         let cfg = cfg_with_mode(BackendMode::Mock);
-        let backend = assemble(&cfg).await.expect("mock assemble should succeed");
+        let backend = assemble(&cfg, noop()).await.expect("mock assemble should succeed");
         assert!(backend.services.is_some(), "mock services provider must be Some");
         assert!(backend.packages.is_some(), "mock packages provider must be Some");
         assert!(backend.logs.is_some(), "mock logs provider must be Some");
@@ -236,7 +243,7 @@ mod tests {
     #[tokio::test]
     async fn assemble_mock_mode_metrics_works() {
         let cfg = cfg_with_mode(BackendMode::Mock);
-        let backend = assemble(&cfg).await.expect("mock assemble should succeed");
+        let backend = assemble(&cfg, noop()).await.expect("mock assemble should succeed");
         let snap = backend.metrics.snapshot().expect("mock metrics snapshot should succeed");
         assert!(snap.mem_total > 0);
     }
@@ -244,7 +251,7 @@ mod tests {
     #[tokio::test]
     async fn assemble_auto_mode_has_real_metrics() {
         let cfg = cfg_with_mode(BackendMode::Auto);
-        let backend = assemble(&cfg).await.expect("auto assemble should succeed");
+        let backend = assemble(&cfg, noop()).await.expect("auto assemble should succeed");
         let snap = backend.metrics.snapshot().expect("auto metrics snapshot should succeed");
         // Real sysinfo — mem_total must reflect the actual host
         assert!(snap.mem_total > 0, "auto mode must report real mem_total > 0");
@@ -257,7 +264,7 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         {
             let cfg = cfg_with_mode(BackendMode::Auto);
-            let backend = assemble(&cfg).await.expect("auto assemble should succeed");
+            let backend = assemble(&cfg, noop()).await.expect("auto assemble should succeed");
             assert!(backend.services.is_none(), "off-linux auto services must be None");
             assert!(backend.packages.is_none(), "off-linux auto packages must be None");
             assert!(backend.logs.is_none(), "off-linux auto logs must be None");
@@ -278,7 +285,7 @@ mod tests {
         #[cfg(not(target_os = "linux"))]
         {
             let cfg = cfg_with_mode(BackendMode::Real);
-            let result = assemble(&cfg).await;
+            let result = assemble(&cfg, noop()).await;
             assert!(
                 matches!(result, Err(AssembleError::UnsupportedPlatform)),
                 "Real mode off-linux must return UnsupportedPlatform"
@@ -287,7 +294,7 @@ mod tests {
         #[cfg(target_os = "linux")]
         {
             // On Linux, Real mode is allowed (may succeed or fail with other error)
-            let _ = assemble(&cfg_with_mode(BackendMode::Real)).await;
+            let _ = assemble(&cfg_with_mode(BackendMode::Real), noop()).await;
         }
     }
 

@@ -9,6 +9,7 @@ pub mod lifecycle;
 pub mod transport;
 
 use std::sync::{Arc, Mutex};
+use crate::audit::{AuditDecision, AuditEvent, AuditKind, DynAuditSink, FileAuditSink};
 use crate::backend::assemble::assemble;
 use crate::auth::bootstrap::BootstrapState;
 use crate::auth::store::{FileStore, IdentityStore};
@@ -21,13 +22,48 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
         )
         .init();
     let cfg = config::load(config_path.as_deref())?;
-    for w in config::validate(&cfg)? {
+    let config_warnings = config::validate(&cfg)?;
+    for w in &config_warnings {
         tracing::warn!("config: {w}");
     }
 
-    // Identity store.
+    // ── Audit sink ─────────────────────────────────────────────────────────────
     let state_dir = &cfg.state_dir;
     std::fs::create_dir_all(state_dir)?;
+
+    let (audit, writer_handle): (DynAuditSink, Option<std::thread::JoinHandle<()>>) =
+        if cfg.audit.enabled {
+            let audit_dir = cfg.audit.dir.clone()
+                .unwrap_or_else(|| state_dir.join("audit"));
+            std::fs::create_dir_all(&audit_dir)?;
+            let audit_path = audit_dir.join("audit.jsonl");
+            let (sink, writer) = FileAuditSink::new(
+                cfg.audit.queue,
+                audit_path,
+                cfg.audit.max_bytes,
+                cfg.audit.generations,
+            );
+            let handle = writer.spawn();
+            (sink as DynAuditSink, Some(handle))
+        } else {
+            tracing::warn!("audit disabled — every auth/mutation decision will be unrecorded");
+            (crate::audit::noop(), None)
+        };
+
+    // Config notice.
+    audit.emit(
+        AuditEvent::new(AuditKind::Config, AuditDecision::Ok, "system")
+            .with_detail(format!(
+                "config_path={} warnings={}",
+                config_path
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<defaults>".to_string()),
+                config_warnings.len(),
+            )),
+    );
+
+    // Identity store.
     let identity_path = state_dir.join("identity.json");
     let store = Arc::new(FileStore::open(&identity_path)?);
 
@@ -38,15 +74,63 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
     ));
 
     // Assemble backend from config (Auto/Mock/Real mode).
-    let backend = Arc::new(assemble(&cfg).await?);
+    let backend = Arc::new(assemble(&cfg, Arc::clone(&audit)).await?);
 
-    let (service, pump_handles) = lifecycle::build_service(backend, store, bootstrap);
-    let handles = transport::start_listeners(&cfg, service).await?;
-    for h in &handles {
-        tracing::info!("listening on {}", h.local_addr());
+    // Emit Degraded notices for absent optional providers.
+    if backend.services.is_none() {
+        audit.emit(
+            AuditEvent::new(AuditKind::Degraded, AuditDecision::Err, "system")
+                .with_detail("provider=services reason=unavailable"),
+        );
+    }
+    if backend.packages.is_none() {
+        audit.emit(
+            AuditEvent::new(AuditKind::Degraded, AuditDecision::Err, "system")
+                .with_detail("provider=packages reason=unavailable"),
+        );
+    }
+    if backend.logs.is_none() {
+        audit.emit(
+            AuditEvent::new(AuditKind::Degraded, AuditDecision::Err, "system")
+                .with_detail("provider=logs reason=unavailable"),
+        );
     }
 
+    let (service, pump_handles) =
+        lifecycle::build_service(backend, store, bootstrap, Arc::clone(&audit));
+    let handles = transport::start_listeners(&cfg, service).await?;
+
+    // Listener notices.
+    for h in &handles {
+        let addr = h.local_addr();
+        tracing::info!("listening on {addr}");
+        audit.emit(
+            AuditEvent::new(AuditKind::Listener, AuditDecision::Ok, "system")
+                .with_detail(format!("addr={addr} event=start")),
+        );
+    }
+
+    // Daemon started.
+    audit.emit(
+        AuditEvent::new(AuditKind::Lifecycle, AuditDecision::Ok, "system")
+            .with_detail("daemon started"),
+    );
+
     lifecycle::shutdown_signal().await;
+
+    // Daemon shutting down.
+    audit.emit(
+        AuditEvent::new(AuditKind::Lifecycle, AuditDecision::Ok, "system")
+            .with_detail("shutting down"),
+    );
+    for h in &handles {
+        let addr = h.local_addr();
+        audit.emit(
+            AuditEvent::new(AuditKind::Listener, AuditDecision::Ok, "system")
+                .with_detail(format!("addr={addr} event=stop")),
+        );
+    }
+
     tracing::info!("shutting down");
     for h in pump_handles {
         h.abort();
@@ -54,6 +138,23 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
     for h in handles {
         h.shutdown();
     }
+
+    // Flush audit writer (bounded 3-second join).
+    audit.shutdown();
+    drop(audit);
+    if let Some(jh) = writer_handle {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            tokio::task::spawn_blocking(move || {
+                let _ = jh.join();
+            }),
+        )
+        .await;
+        if result.is_err() {
+            tracing::warn!("audit writer did not flush within 3 s — some events may be lost");
+        }
+    }
+
     Ok(())
 }
 

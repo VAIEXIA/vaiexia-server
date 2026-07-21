@@ -5,7 +5,7 @@ use vaiexia_core::diagnostic::Diagnostic;
 use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 
-use crate::api::dto::HostInfoDto;
+use crate::api::{ApiDeps, ScopeAudit, dto::HostInfoDto};
 use crate::api::register_scoped;
 use crate::backend::SystemBackend;
 use crate::diag::backend_error_to_diagnostic;
@@ -18,12 +18,19 @@ pub fn host_info_result(be: &SystemBackend) -> Result<HostInfoDto, Diagnostic> {
 #[derive(Debug, Deserialize)]
 pub struct HostInfoParams {} // {} — no params
 
-pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>) -> ServiceBuilder {
+pub fn register(builder: ServiceBuilder, deps: &ApiDeps) -> ServiceBuilder {
+    let be = Arc::clone(&deps.backend);
     let method = Method::new("server.host.info").expect("valid method");
-    register_scoped(builder, method, move |_p: HostInfoParams, _subject: Subject| {
-        let be = Arc::clone(&be);
-        async move { host_info_result(&be) }
-    })
+    register_scoped(
+        builder,
+        method,
+        deps.audit.clone(),
+        ScopeAudit::DenyOnly,
+        move |_p: HostInfoParams, _subject: Subject| {
+            let be = Arc::clone(&be);
+            async move { host_info_result(&be) }
+        },
+    )
 }
 
 #[cfg(test)]

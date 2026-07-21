@@ -7,6 +7,7 @@ use std::path::Path;
 
 use crate::config::model::{ListenerKind, ServerConfig};
 
+
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
     #[error("no listeners configured")]
@@ -15,6 +16,8 @@ pub enum ConfigError {
     ObfsDeferred,
     #[error("listener[{index}] ({bind}): {reason}")]
     Listener { index: usize, bind: String, reason: String },
+    #[error("audit config: {0}")]
+    Audit(String),
     #[error("config error: {0}")]
     Figment(String),
 }
@@ -85,6 +88,29 @@ pub fn validate(cfg: &ServerConfig) -> Result<Vec<String>, ConfigError> {
             }
         }
     }
+    // ── Audit config validation ────────────────────────────────────────────────
+    if cfg.audit.enabled {
+        if cfg.audit.generations < 1 {
+            return Err(ConfigError::Audit(
+                "generations must be >= 1".into(),
+            ));
+        }
+        if cfg.audit.max_bytes < 64 * 1024 {
+            return Err(ConfigError::Audit(
+                "max_bytes must be >= 65536 (64 KiB)".into(),
+            ));
+        }
+        if cfg.audit.queue < 64 {
+            return Err(ConfigError::Audit(
+                "queue must be >= 64".into(),
+            ));
+        }
+    } else {
+        warnings.push(
+            "audit disabled — every auth/mutation decision will be unrecorded".into(),
+        );
+    }
+
     Ok(warnings)
 }
 
@@ -184,6 +210,28 @@ bind = "127.0.0.1:7443"
             matches!(&err, ConfigError::Listener { reason, .. } if reason.contains("cert not readable")),
             "got: {err}"
         );
+    }
+
+    #[test]
+    fn audit_defaults_are_enabled_and_bounded() {
+        let cfg = ServerConfig::default();
+        assert!(cfg.audit.enabled);
+        assert!(cfg.audit.max_bytes >= 64 * 1024);
+        assert!(cfg.audit.generations >= 1);
+        assert!(cfg.audit.queue >= 64);
+        // Validate should pass with defaults.
+        assert!(validate(&cfg).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_zero_audit_generations() {
+        use crate::config::model::AuditCfg;
+        let cfg = ServerConfig {
+            audit: AuditCfg { enabled: true, generations: 0, ..AuditCfg::default() },
+            ..Default::default()
+        };
+        let err = validate(&cfg).unwrap_err();
+        assert!(matches!(err, ConfigError::Audit(_)), "got: {err}");
     }
 
     #[test]

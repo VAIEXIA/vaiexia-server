@@ -5,7 +5,7 @@ use vaiexia_core::diagnostic::{codes, Diagnostic};
 use vaiexia_core::protocol::Method;
 use vaiexia_core::server::ServiceBuilder;
 
-use crate::api::dto::{LogEntryDto, PageDto};
+use crate::api::{ApiDeps, ScopeAudit, dto::{LogEntryDto, PageDto}};
 use crate::api::register_scoped;
 use crate::backend::{LogQuery, SystemBackend, UnitName};
 use crate::diag::{backend_error_to_diagnostic, domain_codes};
@@ -82,12 +82,21 @@ pub async fn logs_query_result(
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
-pub fn register(builder: ServiceBuilder, be: Arc<SystemBackend>) -> ServiceBuilder {
+pub fn register(builder: ServiceBuilder, deps: &ApiDeps) -> ServiceBuilder {
+    let be = Arc::clone(&deps.backend);
     let query_method = Method::new("server.logs.query").expect("valid method");
-    register_scoped(builder, query_method, move |p: LogsQueryParams, _subject: Subject| {
-        let be = Arc::clone(&be);
-        async move { logs_query_result(&be, p).await }
-    })
+    // server.logs.query is on the sensitive-read list (logs can leak secrets, spec §4):
+    // emit ScopeDecision-Allow in addition to the usual deny audit.
+    register_scoped(
+        builder,
+        query_method,
+        deps.audit.clone(),
+        ScopeAudit::AuditAllow,
+        move |p: LogsQueryParams, _subject: Subject| {
+            let be = Arc::clone(&be);
+            async move { logs_query_result(&be, p).await }
+        },
+    )
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

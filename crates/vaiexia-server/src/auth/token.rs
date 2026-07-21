@@ -64,6 +64,26 @@ pub fn verify_secret(presented: &[u8], stored_hash: &[u8; 32]) -> bool {
     hash_secret(presented).ct_eq(stored_hash).into()
 }
 
+/// Extract the loggable `key_id` handle from a capability token without
+/// decoding the secret. Returns `None` on any malformed input.
+/// NEVER extracts or returns the secret segment — only the key_id portion.
+pub fn parse_key_id(cap: &Capability) -> Option<String> {
+    let s = cap.reveal();
+    let mut it = s.splitn(3, '.');
+    if it.next()? != CAP_PREFIX {
+        return None;
+    }
+    let key_id = it.next()?.to_string();
+    if key_id.len() != 16
+        || !key_id
+            .bytes()
+            .all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
+    {
+        return None;
+    }
+    Some(key_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -145,6 +165,25 @@ mod tests {
         // flip one byte
         secret_bytes[0] ^= 0xFF;
         assert!(!verify_secret(&secret_bytes, &m.secret_hash));
+    }
+
+    #[test]
+    fn parse_key_id_returns_only_key_id() {
+        let m = mint();
+        let key_id = parse_key_id(&m.capability).expect("parse_key_id on minted cap");
+        assert_eq!(key_id, m.key_id);
+        // The raw capability contains vxs1.<key_id>.<secret>; parse_key_id
+        // must NOT return the secret segment.
+        let raw = m.capability.reveal();
+        let secret_seg = raw.splitn(3, '.').nth(2).unwrap();
+        assert!(!key_id.contains(secret_seg));
+    }
+
+    #[test]
+    fn parse_key_id_returns_none_on_garbage() {
+        assert!(parse_key_id(&Capability::new("garbage")).is_none());
+        assert!(parse_key_id(&Capability::new("vxs1.short")).is_none());
+        assert!(parse_key_id(&Capability::new("")).is_none());
     }
 
     #[test]

@@ -94,7 +94,7 @@ async fn auth_e2e_full_flow() {
 
     // Build the auth-enabled service.
     let backend = make_backend();
-    let (service, pump_handles) = build_service(backend, Arc::clone(&store), bootstrap);
+    let (service, pump_handles) = build_service(backend, Arc::clone(&store), bootstrap, vaiexia_server::audit::noop());
 
     let serve_handle = serve(service, "127.0.0.1:0").await.unwrap();
     let addr = serve_handle.addr();
@@ -254,7 +254,7 @@ async fn auth_login_nonexistent_user_unauthenticated() {
     let store = Arc::new(FileStore::open(&store_path).unwrap()) as Arc<dyn IdentityStore>;
     let bootstrap = Arc::new(Mutex::new(BootstrapState::Disabled));
     let backend = make_backend();
-    let (service, pump_handles) = build_service(backend, store, bootstrap);
+    let (service, pump_handles) = build_service(backend, store, bootstrap, vaiexia_server::audit::noop());
 
     let serve_handle = serve(service, "127.0.0.1:0").await.unwrap();
     let addr = serve_handle.addr();
