@@ -52,11 +52,21 @@ impl PumpHandle {
 
 const PUMP_BACKOFF_MS: u64 = 100;
 
-/// Spawn a supervised future factory. When the future returns or panics, the
+/// Spawn a supervised future factory. When the future returns OR panics, the
 /// factory is called again after a short backoff. Returns a `PumpHandle` that
 /// can abort the loop.
+///
+/// The panic case is why the poll goes through `catch_unwind`: a panic inside
+/// the pump future (a poisoned mutex in the job registry, a provider that
+/// unwraps) would otherwise unwind the supervisor task itself, silently
+/// killing that event source for the lifetime of the daemon. Catching keeps
+/// the restart contract the name promises, and logs the panic — a pump that
+/// dies quietly is exactly the kind of degradation an operator never notices.
+///
+/// The panicked future is dropped before the next attempt; the factory always
+/// builds a fresh one, so no state is carried across a panic.
 pub fn spawn_supervised<F>(
-    _name: &'static str,
+    name: &'static str,
     mut factory: F,
 ) -> PumpHandle
 where
@@ -64,7 +74,21 @@ where
 {
     let task = tokio::spawn(async move {
         loop {
-            factory().await;
+            let mut fut = factory();
+            let outcome = std::future::poll_fn(|cx| {
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    fut.as_mut().poll(cx)
+                })) {
+                    Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+                    Ok(std::task::Poll::Ready(())) => std::task::Poll::Ready(Ok(())),
+                    Err(payload) => std::task::Poll::Ready(Err(payload)),
+                }
+            })
+            .await;
+            drop(fut);
+            if outcome.is_err() {
+                tracing::error!(pump = name, "pump panicked — restarting after backoff");
+            }
             tokio::time::sleep(tokio::time::Duration::from_millis(PUMP_BACKOFF_MS)).await;
         }
     });
@@ -114,6 +138,33 @@ mod tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
         let c = *count.lock().unwrap();
         assert!(c >= 2, "pump should have restarted at least once, got {c}");
+    }
+
+    /// A panicking pump must NOT kill the supervisor: the factory has to be
+    /// called again. Without `catch_unwind` in `spawn_supervised` the panic
+    /// unwinds the supervisor task and the count stays at 1 forever.
+    #[tokio::test]
+    async fn spawn_supervised_restarts_after_future_panics() {
+        let count = Arc::new(Mutex::new(0u32));
+        let count2 = Arc::clone(&count);
+        // NOTE: the default panic hook is deliberately left in place — the
+        // deliberate panic messages on stderr are noise, but swapping a
+        // process-global hook would race every other test thread.
+        let handle = spawn_supervised("panicking-pump", move || {
+            let count = Arc::clone(&count2);
+            Box::pin(async move {
+                // Increment BEFORE panicking so the counter records attempts.
+                {
+                    let mut c = count.lock().unwrap();
+                    *c += 1;
+                }
+                panic!("pump blew up");
+            })
+        });
+        tokio::time::sleep(tokio::time::Duration::from_millis(350)).await;
+        handle.abort();
+        let c = *count.lock().unwrap();
+        assert!(c >= 2, "panicking pump must be restarted, got {c} attempt(s)");
     }
 
     #[tokio::test]
