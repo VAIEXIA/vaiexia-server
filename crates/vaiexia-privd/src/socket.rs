@@ -33,6 +33,17 @@ const MAX_REQUEST_BYTES: usize = 1 << 20;
 const MAX_RESPONSE_BYTES: usize = 1 << 20;
 /// Hard timeout for a single package operation.
 const EXEC_TIMEOUT: Duration = Duration::from_secs(300);
+/// Deadline for reading a request frame off an accepted connection.
+///
+/// privd serves connections one at a time on the accept loop, so a peer that
+/// connects and then never writes would otherwise wedge the helper FOREVER —
+/// no further package operation could ever run until a restart. The peer is
+/// uid-gated, but "compromised daemon" is exactly the attacker class privd
+/// exists to contain, and a half-open connection from a crashed daemon has the
+/// same effect. Bound the read.
+const PEER_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// Deadline for writing the (small) response frame back to the peer.
+const PEER_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Read a length-prefixed frame from the stream.
 /// Frame: 4-byte BE length + payload bytes.
@@ -266,11 +277,14 @@ pub fn handle_connection(
     job_lock: &Mutex<()>,
     allowlist: &Allowlist,
 ) {
-    // SO_PEERCRED uid check
+    // SO_PEERCRED uid check. EXACT match only — there is no root exemption:
+    // the documented gate (THREAT-MODEL.md §5) is "refuses any uid that does
+    // not match VAIEXIA_DAEMON_UID", and an extra always-accepted peer is a
+    // gate the operator did not ask for. When the env var is unset privd
+    // defaults `daemon_uid` to its own uid, so a root-run privd still accepts
+    // root — the default path is unaffected.
     match peer_uid(&stream) {
-        Some(uid) if uid == daemon_uid || uid == 0 => {
-            // uid 0 (root) is also allowed for testing/setup
-        }
+        Some(uid) if uid == daemon_uid => {}
         Some(uid) => {
             eprintln!("privd: refused connection from uid {uid} (expected {daemon_uid})");
             return;
@@ -279,6 +293,15 @@ pub fn handle_connection(
             eprintln!("privd: SO_PEERCRED failed — refusing connection");
             return;
         }
+    }
+
+    // Bound both directions before touching the peer's bytes: a silent or
+    // stalled peer must not hold the single-threaded accept loop hostage.
+    if stream.set_read_timeout(Some(PEER_READ_TIMEOUT)).is_err()
+        || stream.set_write_timeout(Some(PEER_WRITE_TIMEOUT)).is_err()
+    {
+        eprintln!("privd: cannot set socket timeouts — refusing connection");
+        return;
     }
 
     // Read request frame
