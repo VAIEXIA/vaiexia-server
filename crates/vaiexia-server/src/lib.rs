@@ -6,6 +6,7 @@ pub mod config;
 pub mod diag;
 pub mod events;
 pub mod lifecycle;
+pub mod notify;
 pub mod transport;
 
 use std::sync::{Arc, Mutex};
@@ -115,8 +116,10 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
         AuditEvent::new(AuditKind::Lifecycle, AuditDecision::Ok, "system")
             .with_detail("daemon started"),
     );
+    notify::ready();
 
     lifecycle::shutdown_signal().await;
+    notify::stopping();
 
     // Daemon shutting down.
     audit.emit(
@@ -158,6 +161,25 @@ pub async fn run(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn 
     Ok(())
 }
 
+/// Validate the effective config and print a summary. Exit-code contract:
+/// Ok(()) = valid (warnings allowed), Err = invalid. Used by operators and by
+/// the packaged unit's ExecStartPre gate.
+pub fn check_config(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let cfg = config::load(config_path.as_deref())?;
+    let warnings = config::validate(&cfg)?;
+    println!("config OK");
+    println!("  state_dir = {}", cfg.state_dir.display());
+    println!("  audit     = enabled={} dir={}", cfg.audit.enabled,
+        cfg.audit.dir.clone().unwrap_or_else(|| cfg.state_dir.join("audit")).display());
+    for (i, l) in cfg.listeners.iter().enumerate() {
+        println!("  listener[{i}] = {:?} {}", l.kind, l.bind);
+    }
+    for w in &warnings {
+        println!("  warning: {w}");
+    }
+    Ok(())
+}
+
 /// Reset admin: clear accounts from the identity store and regenerate the
 /// bootstrap code so a new admin can be claimed.
 pub fn reset_admin(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
@@ -187,4 +209,51 @@ pub fn reset_admin(config_path: Option<std::path::PathBuf>) -> Result<(), Box<dy
     tracing::info!(path = %code_path.display(), "bootstrap code regenerated for reset-admin");
     println!("reset-admin: bootstrap code written to {}", code_path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Write a minimal TOML config to a temp file and return its path. `tag`
+    /// must be unique per test — the tests run concurrently and would otherwise
+    /// clobber each other's file.
+    fn write_temp_config(tag: &str, toml: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("vaiexia-check-cfg-{}-{tag}.toml", std::process::id()));
+        std::fs::write(&path, toml).unwrap();
+        path
+    }
+
+    #[test]
+    fn check_config_valid_http_config_returns_ok() {
+        let path = write_temp_config(
+            "valid-http",
+            r#"
+state_dir = "/tmp/vaiexia-test"
+[[listeners]]
+kind = "http"
+bind = "127.0.0.1:7443"
+"#,
+        );
+        let result = check_config(Some(path.clone()));
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_ok(), "valid config must return Ok: {result:?}");
+    }
+
+    #[test]
+    fn check_config_obfs_listener_returns_err() {
+        let path = write_temp_config(
+            "obfs-listener",
+            r#"
+state_dir = "/tmp/vaiexia-test"
+[[listeners]]
+kind = "obfs-tcp"
+bind = "127.0.0.1:9000"
+"#,
+        );
+        let result = check_config(Some(path.clone()));
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_err(), "obfs listener config must return Err");
+    }
 }
