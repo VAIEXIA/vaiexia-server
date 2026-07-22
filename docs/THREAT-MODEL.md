@@ -74,8 +74,10 @@ remain unmitigated in v1.
   parameter cannot inject fake log lines or bloat the audit file.
 - **Fuzz-tested parsers**: all attacker-facing parsers (package name, unit name,
   journal line, privd request frame, token parse, pkg-list, audit chain) are
-  covered by seven cargo-fuzz targets that run 200,000 iterations each on
-  nightly CI.  A portable adversarial corpus test runs on every `cargo test`.
+  covered by seven cargo-fuzz targets, run at 200,000 iterations each as a
+  pre-release step (nightly toolchain required; **there is no CI workflow in
+  this repository yet**, so nothing runs them automatically — see INSTALL.md
+  §9).  A portable adversarial corpus test does run on every `cargo test`.
 
 ### 5. Compromised daemon (post-exploit containment)
 
@@ -103,7 +105,12 @@ packages.
   deny all.  Invalid allowlist lines are skipped (fail-closed narrowing).
   See INSTALL.md §3.
 - **Single job + hard timeout**: privd serializes all package operations and
-  enforces a hard timeout per job.
+  enforces a hard timeout per job.  Both directions of an accepted connection
+  also carry a read/write deadline, so a stalled peer cannot wedge the helper.
+- **Package operations are audited on both ends of their lifetime**: the
+  request (accepted or rejected, with the package name and job id) as a
+  `mutation` record, and the outcome as a `job` record.  A compromised token
+  cannot install software invisibly.
 - **Polkit scoped rule**: the daemon can only call `start`, `stop`, and
   `restart` on units outside the denylist of its own privilege-boundary units.
   The allowlist variant restricts this further to an enumerated set.
@@ -118,7 +125,8 @@ packages.
   advisory database (yanked crates denied), a license allowlist (MIT, Apache-2.0,
   BSD-2-Clause, BSD-3-Clause, ISC, and a small set of named exceptions), ban on
   wildcard version requirements, and restriction to the crates.io registry.
-  This check is a required CI gate before any release.
+  This check is a required manual gate before any release — it is not wired to
+  automation, because this repository has no CI workflow yet.
 - **`rustls` for TLS**: no OpenSSL in the TLS stack.
 
 ### 7. Log tamper / forensic attacker
@@ -236,9 +244,11 @@ acknowledged.  They are NOT silently accepted.
 | **obfs listeners** | Deferred.  The subscription-authz gap (§5.4) and lack of real-DPI validation mean obfs listeners are not included in v1. |
 | **mTLS client auth** (`client_ca_pem`) | Reserved in core; not wired in v1.  The config key is accepted but has no effect. |
 | **Certificate hot-reload** | Not supported.  Rotating a cert requires `systemctl restart vaiexia-server`.  A core additive is needed to watch the cert path. |
-| **Live systemd / journald / privd / polkit behavior** | CI-gated.  The packaging artifacts are structurally tested on the dev host; runtime behavior (socket activation, polkit enforcement, privd dispatch, sd_notify readiness) is verified only on a real Linux/systemd CI host. |
+| **Live systemd / journald / privd / polkit behavior** | Unverified on the dev host.  The packaging artifacts are structurally tested and the Linux-gated code is compile-checked cross-target, but runtime behavior (socket activation, polkit enforcement, privd dispatch, sd_notify readiness) has only ever been reasoned about — it must be exercised on a real Linux/systemd host before release. |
 | **Replay defense** | Encrypted transport only (TLS or WireGuard).  The `request_id` field in audit records is a correlation id, not a replay nonce.  Core does not expose `Request.id` to verifier/handlers in v1. |
-| **privd `LISTEN_PID` check** | Not checked.  systemd sets `LISTEN_PID` and `LISTEN_FDS` correctly under socket activation; not checking it is benign in this deployment but is noted for completeness. |
+| **privd `LISTEN_PID` check** | Checked.  privd only adopts the inherited fd when `LISTEN_PID` names its own process; otherwise it binds its own socket. |
+| **`priv` audit kind** | Declared in the schema but never emitted.  The daemon→privd round trip is covered indirectly by the package `mutation` + `job` pair; a per-call `priv` record is a v2 addition. |
+| **journald follow restart** | The `--follow` task that feeds the `server.logs` subscription is spawned once by the log provider and is NOT supervised.  If `journalctl` exits, log *subscriptions* go silent until the daemon restarts; `server.logs.query` is unaffected (it spawns per query). |
 | **`last_used` display lag** | The identity store debounces `last_used` touches by 60 seconds.  The displayed `last_used` timestamp may lag by up to 60 s.  This is a confirmed design decision (not a bug). |
 | **`request_id` and `peer` empty in v1** | Core does not expose `Request.id` or the remote peer address to verifier/handler call sites.  The schema fields are reserved and will be populated when a core additive threads them through.  Until then, filtering audit records by `request_id` will return no results. |
 | **Per-request `transport` field** | Populated only on `listener` events.  Per-request transport is empty in v1 for the same core-limitation reason. |

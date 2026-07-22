@@ -16,7 +16,7 @@ Every command is real and runnable on a systemd-based Linux host.
 6. [Enable and start](#6-enable-and-start)
 7. [First-run bootstrap](#7-first-run-bootstrap)
 8. [Audit trail](#8-audit-trail)
-9. [Security CI gates](#9-security-ci-gates)
+9. [Security release checklist](#9-security-release-checklist)
 
 ---
 
@@ -407,6 +407,26 @@ as a **path** only — the secret itself never appears in the log or in
 cat /var/lib/vaiexia/bootstrap.code
 ```
 
+### Request envelope
+
+The daemon speaks the VAIEXIA protocol, **not** JSON-RPC 2.0.  Every request is
+a POST to `/rpc` with this envelope:
+
+```json
+{
+  "id": "<any unique string>",
+  "version": { "major": 1, "minor": 0 },
+  "method": "<method name>",
+  "params": { },
+  "capability": "vxs1.<key_id>.<secret>"
+}
+```
+
+`capability` is omitted for the two anonymous methods (`auth.login`,
+`auth.bootstrap.claim`).  The response is
+`{"id": …, "outcome": {"ok": <value>}}` or `{"id": …, "outcome": {"err":
+{"code": …, "message": …}}}`.
+
 ### Claim the bootstrap token via `auth.bootstrap.claim`
 
 ```bash
@@ -415,8 +435,8 @@ CODE=$(cat /var/lib/vaiexia/bootstrap.code)
 curl -s -X POST http://127.0.0.1:7443/rpc \
     -H 'Content-Type: application/json' \
     -d "{
-      \"jsonrpc\": \"2.0\",
-      \"id\": 1,
+      \"id\": \"claim-1\",
+      \"version\": { \"major\": 1, \"minor\": 0 },
       \"method\": \"auth.bootstrap.claim\",
       \"params\": {
         \"code\": \"${CODE}\",
@@ -430,6 +450,22 @@ On success the response contains a `vxs1.<key_id>.<secret>` capability token.
 Store it securely — it grants full admin access (`auth.admin`,
 `server.read`, `server.logs.read`, `server.services.write`,
 `server.packages.write`).
+
+Use it on every subsequent call:
+
+```bash
+CAP='vxs1.…'   # the token returned above
+
+curl -s -X POST http://127.0.0.1:7443/rpc \
+    -H 'Content-Type: application/json' \
+    -d "{
+      \"id\": \"whoami-1\",
+      \"version\": { \"major\": 1, \"minor\": 0 },
+      \"method\": \"auth.whoami\",
+      \"params\": {},
+      \"capability\": \"${CAP}\"
+    }"
+```
 
 ### Bootstrap semantics
 
@@ -487,7 +523,7 @@ fields are omitted (not null) when not applicable.
 | Field           | Type   | Required | Description |
 |-----------------|--------|----------|-------------|
 | `schema_version`| int    | yes      | Always `1` in v1 |
-| `seq`           | uint64 | yes      | Monotonic sequence number (never resets across restarts) |
+| `seq`           | uint64 | yes      | Monotonic sequence number. Resumed from the active file's last line on restart, so it does not reset across a normal restart. It DOES restart from 1 if the daemon starts against an empty active file (immediately after a rotation) or if the last line is a torn write — both are visible as a `prev` genesis marker on that record. |
 | `prev`          | string | yes      | First 16 hex chars of the BLAKE3 hash of the preceding line (genesis: `"0000000000000000"`) |
 | `ts_wall`       | uint64 | yes      | Unix timestamp (seconds) |
 | `kind`          | string | yes      | Event kind (see below) |
@@ -511,15 +547,15 @@ fields are omitted (not null) when not applicable.
 | `auth_decision`   | Every `verify()` call: login, token verification |
 | `topic_decision`  | Every `verify_topic()` call: log subscribe allow AND deny |
 | `scope_decision`  | Scope check: always on deny; also on allow for `server.logs.query` (sensitive read) |
-| `mutation`        | State-changing handler (services start/stop/restart, packages, token create/revoke) |
-| `priv`            | Daemon-to-privd round trip (verb, outcome, latency) |
+| `mutation`        | State-changing handler: services start/stop/restart, package install/remove (request accepted or rejected), token create/revoke |
+| `priv`            | Reserved. The daemon-to-privd round trip is NOT separately audited in v1 — the package `mutation` + `job` pair already covers who asked and how it ended. No record of this kind is written. |
 | `bootstrap`       | Bootstrap claim allow or deny |
 | `lifecycle`       | Daemon start and shutdown |
 | `config`          | Config loaded at startup |
 | `listener`        | Listener bind/start/stop |
 | `rate_limit`      | Rate-limit trip (login or bootstrap) |
 | `degraded`        | Backend provider absent at startup |
-| `job`             | Package install/remove job: start, succeed, fail, timeout |
+| `job`             | Terminal outcome of a package install/remove job (`ok`, `timeout`, `denied`, `unavailable`, …), with the job latency. The job's *start* is the `mutation` record that names its job id. |
 | `audit_loss`      | Writer-emitted when events were dropped under queue overflow |
 
 ### Reason code vocabulary
@@ -571,10 +607,12 @@ println!("verified {count} records");
 
 ---
 
-## 9. Security CI Gates
+## 9. Security Release Checklist
 
-The following gates must pass before any release.  Commands are shown as they
-run on a nightly Linux CI host.
+The following checks must pass before any release.  **There is no CI workflow
+in this repository yet** — nothing runs these automatically.  Until a pipeline
+exists they are a manual gate, and the Linux-only ones require a real
+systemd host (the Windows dev host cannot run them).
 
 ### Supply-chain check (`cargo deny`)
 
@@ -584,10 +622,10 @@ cargo deny check
 
 Checks advisories (yanked crates), banned duplicate versions, wildcard
 dependencies, license allowlist, and source registry policy against
-`deny.toml` at the workspace root.  CI-gated — run `cargo install cargo-deny
+`deny.toml` at the workspace root.  Run `cargo install cargo-deny
 --locked` to run it locally.
 
-### Fuzz targets (nightly CI only)
+### Fuzz targets (nightly toolchain only)
 
 Seven fuzz targets cover all attacker-facing parsers.  Each requires the
 nightly toolchain and `cargo-fuzz`:
@@ -604,19 +642,21 @@ cargo +nightly fuzz run audit_chain  -- -runs=200000
 
 Fuzz targets live in `crates/vaiexia-server/fuzz/` (own workspace; not a
 member of the main workspace).  Run them from that directory or pass `-p
-vaiexia-server-fuzz` to cargo-fuzz.  These targets are **CI-gated** — a
-stable toolchain cannot run them.  A portable adversarial corpus test
+vaiexia-server-fuzz` to cargo-fuzz.  A stable toolchain cannot run them, so
+they are a manual pre-release step today.  A portable adversarial corpus test
 (`crates/vaiexia-server/tests/adversarial_corpus.rs`) covers the same parsers
 on stable and runs on every `cargo test`.
 
-### systemd unit verification (Linux CI only)
+### systemd unit verification (Linux host only)
 
 ```bash
 systemd-analyze verify /etc/systemd/system/vaiexia-server.service
 ```
 
-This is a live systemd check and must run on a real systemd host.  It is
-**CI-gated** — not runnable on the Windows dev host.
+This is a live systemd check and must run on a real systemd host — it is not
+runnable on the Windows dev host, and no automation runs it today.  The same
+applies to everything else that only exists at runtime on Linux: socket
+activation, polkit enforcement, privd dispatch, and `sd_notify` readiness.
 
 ### Config validation (any host with the binary)
 
