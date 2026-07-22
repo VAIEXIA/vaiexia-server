@@ -269,6 +269,12 @@ pub(crate) fn line_hash(line: &str) -> String {
 /// the genesis marker (`"0" × 16`) or the rotated predecessor's last-line hash
 /// — both accepted (single-file verification). Never panics on garbage input
 /// (fuzzed in S4-A5). Returns the verified record count.
+///
+/// LIMIT (documented in THREAT-MODEL.md): because the first record of a file
+/// is unconstrained in BOTH `prev` and `seq`, deleting a PREFIX of a file
+/// yields a body that still verifies. Detecting that requires comparing across
+/// generations (first `prev` vs the rotated file's last-line hash), which this
+/// single-body function cannot do.
 pub fn verify_chain_str(body: &str) -> Result<u64, ChainError> {
     let mut prev: Option<String> = None;
     let mut prev_seq: Option<u64> = None;

@@ -575,12 +575,23 @@ contain secrets.
 
 ### What `seq` and `prev` give you
 
-- **`seq` gaps**: a missing or inserted record is immediately visible as a
-  sequence number gap.
+- **`seq` gaps**: a record deleted or inserted *between* two others is
+  immediately visible as a sequence number gap.
 - **`prev` chain**: editing any line changes its hash, breaking all subsequent
   `prev` links.
-- Together these give **tamper evidence**: edits, truncation, and loss are all
-  detectable.
+- Together these give **tamper evidence** for edits, tail truncation, and
+  queue loss.
+
+**Known gap — head truncation.** `verify_chain` verifies one file in
+isolation, so it cannot check the *first* record of that file: its `prev` has
+no predecessor in the same file (after a rotation it legitimately points at
+the previous generation) and its `seq` may legitimately start at any value.
+An attacker who deletes a *prefix* of `audit.jsonl` therefore leaves a file
+that still verifies. Two manual checks catch it: the first record of a rotated
+sequence should have `prev` equal to the BLAKE3-16 of the last line of
+`audit.jsonl.1`, and the oldest generation should begin at `seq` 1 with the
+genesis `prev`. This is another reason the real answer is shipping records
+off-box.
 
 **Important:** the chain is tamper-*evident*, not tamper-*proof*.  An attacker
 with write access to the file AND knowledge of the BLAKE3 scheme can re-chain

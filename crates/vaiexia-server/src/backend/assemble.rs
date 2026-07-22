@@ -23,8 +23,13 @@ pub enum AssembleError {
 ///   probed and degrades to `None` (→ UNSUPPORTED at the API) on failure.
 /// - `Real` → like Auto but off-Linux → `Err(AssembleError::UnsupportedPlatform)`.
 ///
-/// `audit` is threaded into the privd-backed `PackageManager` provider (on
-/// Linux). Mock and non-privd providers ignore it. Pass `audit::noop()` in
+/// The `audit` parameter is currently UNUSED: no provider emits audit records
+/// of its own. Package operations — the only provider path that reaches a
+/// privileged helper — are audited at the API layer instead (`mutation` on the
+/// request, `job` on the outcome; see `api::server_packages`), which is also
+/// the only layer that knows the calling subject. The parameter is kept
+/// because a provider-level `priv` record (daemon→privd round trip) is the
+/// documented v2 addition and would be wired here. Pass `audit::noop()` in
 /// tests.
 ///
 /// Async: must be called from within the daemon's tokio runtime. The Linux

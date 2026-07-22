@@ -147,8 +147,13 @@ packages.
 The BLAKE3 line chain makes the audit trail **tamper-evident**:
 
 - Any edit to a record breaks the chain from that point forward.
-- Any deleted record creates a visible `seq` gap.
-- Any truncation ends the chain.
+- A record deleted between two others creates a visible `seq` gap.
+- Truncating the tail ends the chain.
+- **Not** covered: deleting a *prefix* of a file. `verify_chain` validates one
+  file standalone, so the first record's `prev` and starting `seq` are
+  unconstrained (they legitimately continue a rotated predecessor). A
+  head-truncated file still verifies; see INSTALL.md §8 for the two manual
+  cross-file checks that detect it.
 - Overflow (queue full) is recorded in the log itself as an `audit_loss` event
   with a `dropped=N` count.
 
