@@ -80,7 +80,11 @@ fn run_unix() {
                 }
             }
             Err(e) => {
+                // `incoming()` never terminates on error, so a persistently
+                // failing accept (bad inherited fd, EMFILE, …) would spin this
+                // loop at 100% CPU and flood the journal. Back off instead.
                 eprintln!("privd: accept error: {e}");
+                std::thread::sleep(std::time::Duration::from_millis(200));
             }
         }
     }
@@ -90,17 +94,31 @@ fn run_unix() {
 fn create_listener() -> std::os::unix::net::UnixListener {
     use std::os::unix::net::UnixListener;
 
-    // Check for systemd socket activation: LISTEN_FDS env var
-    if let Ok(fds_str) = std::env::var("LISTEN_FDS") {
-        if let Ok(n) = fds_str.parse::<i32>() {
-            if n >= 1 {
-                use std::os::unix::io::FromRawFd;
-                // First listen fd is SD_LISTEN_FDS_START = 3
-                let listener = unsafe { UnixListener::from_raw_fd(3) };
-                eprintln!("privd: using socket-activated fd 3");
-                return listener;
-            }
+    // Check for systemd socket activation: LISTEN_FDS env var.
+    //
+    // LISTEN_PID MUST match our own pid (sd_listen_fds(3)): the variables are
+    // inherited by children, so a privd started as a child of a socket-activated
+    // process would otherwise adopt fd 3 — some unrelated inherited descriptor —
+    // as its "listener" and then spin forever on a failing accept.
+    if let Ok(fds_str) = std::env::var("LISTEN_FDS")
+        && let Ok(n) = fds_str.parse::<i32>()
+        && n >= 1
+    {
+        let pid_matches = std::env::var("LISTEN_PID")
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok())
+            .is_some_and(|pid| pid == std::process::id());
+        if pid_matches {
+            use std::os::unix::io::FromRawFd;
+            // First listen fd is SD_LISTEN_FDS_START = 3
+            let listener = unsafe { UnixListener::from_raw_fd(3) };
+            eprintln!("privd: using socket-activated fd 3");
+            return listener;
         }
+        eprintln!(
+            "privd: LISTEN_FDS set but LISTEN_PID does not name this process — \
+             ignoring inherited fds and binding our own socket"
+        );
     }
 
     // Bind a new socket
