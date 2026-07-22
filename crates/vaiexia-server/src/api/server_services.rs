@@ -8,7 +8,7 @@ use vaiexia_core::server::ServiceBuilder;
 
 use crate::api::{ApiDeps, ScopeAudit, dto::{PageDto, UnitDetailDto, UnitDto}};
 use crate::api::register_scoped;
-use crate::audit::{AuditDecision, AuditEvent, AuditKind, DynAuditSink};
+use crate::audit::{AuditDecision, AuditKind};
 use crate::backend::{ServiceState, SystemBackend, UnitName};
 use crate::diag::{backend_error_to_diagnostic, domain_codes};
 
@@ -104,145 +104,104 @@ fn validate_and_get_manager(
     Ok((Arc::clone(mgr), name.to_string()))
 }
 
-pub async fn services_start_result(
-    be: &SystemBackend,
-    audit: &DynAuditSink,
+/// Shared body for start/stop/restart: validate, run under the mutation
+/// timeout, audit the outcome. `verb` selects the backend call and names the
+/// method in the audit record — the three public wrappers differ only in that.
+async fn run_service_mutation(
+    deps: &ApiDeps,
     subject: &Subject,
+    verb: ServiceVerb,
     params: ServiceMutateParams,
 ) -> Result<ServiceOutcomeDto, Diagnostic> {
     let t0 = Instant::now();
-    let (mgr, name) = validate_and_get_manager(be, &params.name)?;
-    let result = tokio::time::timeout(Duration::from_secs(MUTATION_TIMEOUT_SECS), mgr.start(&name)).await;
+    let (mgr, name) = validate_and_get_manager(&deps.backend, &params.name)?;
+    let call = async {
+        match verb {
+            ServiceVerb::Start => mgr.start(&name).await,
+            ServiceVerb::Stop => mgr.stop(&name).await,
+            ServiceVerb::Restart => mgr.restart(&name).await,
+        }
+    };
+    let result = tokio::time::timeout(Duration::from_secs(MUTATION_TIMEOUT_SECS), call).await;
     let latency = t0.elapsed().as_micros() as u64;
+    let method = verb.method();
+    let emit = |decision, outcome: &str| {
+        deps.audit.emit(
+            crate::api::subject_event(deps, subject, AuditKind::Mutation, decision)
+                .with_method(method)
+                .with_detail(format!("unit={name} outcome={outcome}"))
+                .with_latency_us(latency),
+        );
+    };
     match result {
         Err(_elapsed) => {
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Err, subject.id.as_str())
-                    .with_method("server.services.start")
-                    .with_detail(format!("unit={name} outcome=timeout"))
-                    .with_latency_us(latency),
-            );
+            emit(AuditDecision::Err, "timeout");
             Ok(ServiceOutcomeDto { outcome: "timeout", state: ServiceState::Unknown })
         }
         Ok(Err(e)) => {
             let diag = backend_error_to_diagnostic(&e);
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Err, subject.id.as_str())
-                    .with_method("server.services.start")
-                    .with_detail(format!("unit={name} outcome=err"))
-                    .with_latency_us(latency),
-            );
+            emit(AuditDecision::Err, "err");
             Err(diag)
         }
         Ok(Ok(state)) => {
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Ok, subject.id.as_str())
-                    .with_method("server.services.start")
-                    .with_detail(format!("unit={name} outcome=ok"))
-                    .with_latency_us(latency),
-            );
+            emit(AuditDecision::Ok, "ok");
             Ok(ServiceOutcomeDto { outcome: "ok", state })
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ServiceVerb {
+    Start,
+    Stop,
+    Restart,
+}
+
+impl ServiceVerb {
+    fn method(self) -> &'static str {
+        match self {
+            Self::Start => "server.services.start",
+            Self::Stop => "server.services.stop",
+            Self::Restart => "server.services.restart",
+        }
+    }
+}
+
+pub async fn services_start_result(
+    deps: &ApiDeps,
+    subject: &Subject,
+    params: ServiceMutateParams,
+) -> Result<ServiceOutcomeDto, Diagnostic> {
+    run_service_mutation(deps, subject, ServiceVerb::Start, params).await
 }
 
 pub async fn services_stop_result(
-    be: &SystemBackend,
-    audit: &DynAuditSink,
+    deps: &ApiDeps,
     subject: &Subject,
     params: ServiceMutateParams,
 ) -> Result<ServiceOutcomeDto, Diagnostic> {
-    let t0 = Instant::now();
-    let (mgr, name) = validate_and_get_manager(be, &params.name)?;
-    let result = tokio::time::timeout(Duration::from_secs(MUTATION_TIMEOUT_SECS), mgr.stop(&name)).await;
-    let latency = t0.elapsed().as_micros() as u64;
-    match result {
-        Err(_elapsed) => {
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Err, subject.id.as_str())
-                    .with_method("server.services.stop")
-                    .with_detail(format!("unit={name} outcome=timeout"))
-                    .with_latency_us(latency),
-            );
-            Ok(ServiceOutcomeDto { outcome: "timeout", state: ServiceState::Unknown })
-        }
-        Ok(Err(e)) => {
-            let diag = backend_error_to_diagnostic(&e);
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Err, subject.id.as_str())
-                    .with_method("server.services.stop")
-                    .with_detail(format!("unit={name} outcome=err"))
-                    .with_latency_us(latency),
-            );
-            Err(diag)
-        }
-        Ok(Ok(state)) => {
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Ok, subject.id.as_str())
-                    .with_method("server.services.stop")
-                    .with_detail(format!("unit={name} outcome=ok"))
-                    .with_latency_us(latency),
-            );
-            Ok(ServiceOutcomeDto { outcome: "ok", state })
-        }
-    }
+    run_service_mutation(deps, subject, ServiceVerb::Stop, params).await
 }
 
 pub async fn services_restart_result(
-    be: &SystemBackend,
-    audit: &DynAuditSink,
+    deps: &ApiDeps,
     subject: &Subject,
     params: ServiceMutateParams,
 ) -> Result<ServiceOutcomeDto, Diagnostic> {
-    let t0 = Instant::now();
-    let (mgr, name) = validate_and_get_manager(be, &params.name)?;
-    let result = tokio::time::timeout(Duration::from_secs(MUTATION_TIMEOUT_SECS), mgr.restart(&name)).await;
-    let latency = t0.elapsed().as_micros() as u64;
-    match result {
-        Err(_elapsed) => {
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Err, subject.id.as_str())
-                    .with_method("server.services.restart")
-                    .with_detail(format!("unit={name} outcome=timeout"))
-                    .with_latency_us(latency),
-            );
-            Ok(ServiceOutcomeDto { outcome: "timeout", state: ServiceState::Unknown })
-        }
-        Ok(Err(e)) => {
-            let diag = backend_error_to_diagnostic(&e);
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Err, subject.id.as_str())
-                    .with_method("server.services.restart")
-                    .with_detail(format!("unit={name} outcome=err"))
-                    .with_latency_us(latency),
-            );
-            Err(diag)
-        }
-        Ok(Ok(state)) => {
-            audit.emit(
-                AuditEvent::new(AuditKind::Mutation, AuditDecision::Ok, subject.id.as_str())
-                    .with_method("server.services.restart")
-                    .with_detail(format!("unit={name} outcome=ok"))
-                    .with_latency_us(latency),
-            );
-            Ok(ServiceOutcomeDto { outcome: "ok", state })
-        }
-    }
+    run_service_mutation(deps, subject, ServiceVerb::Restart, params).await
 }
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
 pub fn register(builder: ServiceBuilder, deps: &ApiDeps) -> ServiceBuilder {
     let be = Arc::clone(&deps.backend);
-    let audit = deps.audit.clone();
 
     let be1 = Arc::clone(&be);
-    let audit1 = audit.clone();
     let list_method = Method::new("server.services.list").expect("valid method");
     let builder = register_scoped(
         builder,
         list_method,
-        audit1,
+        deps,
         ScopeAudit::DenyOnly,
         move |p: ServicesListParams, _subject: Subject| {
             let be = Arc::clone(&be1);
@@ -251,12 +210,11 @@ pub fn register(builder: ServiceBuilder, deps: &ApiDeps) -> ServiceBuilder {
     );
 
     let be2 = Arc::clone(&be);
-    let audit2 = audit.clone();
     let status_method = Method::new("server.services.status").expect("valid method");
     let builder = register_scoped(
         builder,
         status_method,
-        audit2,
+        deps,
         ScopeAudit::DenyOnly,
         move |p: ServiceStatusParams, _subject: Subject| {
             let be = Arc::clone(&be2);
@@ -264,48 +222,42 @@ pub fn register(builder: ServiceBuilder, deps: &ApiDeps) -> ServiceBuilder {
         },
     );
 
-    let be3 = Arc::clone(&be);
-    let audit3 = audit.clone();
+    let deps3 = deps.clone();
     let start_method = Method::new("server.services.start").expect("valid method");
     let builder = register_scoped(
         builder,
         start_method,
-        audit3.clone(),
+        deps,
         ScopeAudit::DenyOnly,
         move |p: ServiceMutateParams, subject: Subject| {
-            let be = Arc::clone(&be3);
-            let audit = audit3.clone();
-            async move { services_start_result(&be, &audit, &subject, p).await }
+            let deps = deps3.clone();
+            async move { services_start_result(&deps, &subject, p).await }
         },
     );
 
-    let be4 = Arc::clone(&be);
-    let audit4 = audit.clone();
+    let deps4 = deps.clone();
     let stop_method = Method::new("server.services.stop").expect("valid method");
     let builder = register_scoped(
         builder,
         stop_method,
-        audit4.clone(),
+        deps,
         ScopeAudit::DenyOnly,
         move |p: ServiceMutateParams, subject: Subject| {
-            let be = Arc::clone(&be4);
-            let audit = audit4.clone();
-            async move { services_stop_result(&be, &audit, &subject, p).await }
+            let deps = deps4.clone();
+            async move { services_stop_result(&deps, &subject, p).await }
         },
     );
 
-    let be5 = Arc::clone(&be);
-    let audit5 = audit.clone();
+    let deps5 = deps.clone();
     let restart_method = Method::new("server.services.restart").expect("valid method");
     register_scoped(
         builder,
         restart_method,
-        audit5.clone(),
+        deps,
         ScopeAudit::DenyOnly,
         move |p: ServiceMutateParams, subject: Subject| {
-            let be = Arc::clone(&be5);
-            let audit = audit5.clone();
-            async move { services_restart_result(&be, &audit, &subject, p).await }
+            let deps = deps5.clone();
+            async move { services_restart_result(&deps, &subject, p).await }
         },
     )
 }
@@ -320,6 +272,12 @@ mod tests {
 
     fn full_backend() -> Arc<SystemBackend> {
         Arc::new(SystemBackend::from_mock(Arc::new(MockBackend::new())))
+    }
+
+    /// Handler deps with a discarding sink and no identity store — the audit
+    /// `subject` then falls back to the raw subject id (see `ApiDeps`).
+    fn test_deps(backend: Arc<SystemBackend>) -> ApiDeps {
+        ApiDeps { backend, audit: crate::audit::noop(), subjects: None }
     }
 
     fn no_services_backend() -> Arc<SystemBackend> {
@@ -423,7 +381,7 @@ mod tests {
         let be = full_backend();
         let subj = noop_subject();
         let params = ServiceMutateParams { name: "nginx.service".into() };
-        let dto = services_start_result(&be, &crate::audit::noop(), &subj, params).await.unwrap();
+        let dto = services_start_result(&test_deps(be), &subj, params).await.unwrap();
         assert_eq!(dto.outcome, "ok");
         assert_eq!(dto.state, crate::backend::ServiceState::Active);
     }
@@ -436,7 +394,7 @@ mod tests {
         let be = full_backend();
         let subj = noop_subject();
         let params = ServiceMutateParams { name: "a b.service".into() };
-        let err = services_start_result(&be, &crate::audit::noop(), &subj, params).await.unwrap_err();
+        let err = services_start_result(&test_deps(be), &subj, params).await.unwrap_err();
         assert_eq!(err.code, "NOT_FOUND");
     }
 
@@ -446,7 +404,7 @@ mod tests {
         let be = full_backend();
         let subj = noop_subject();
         let params = ServiceMutateParams { name: "foo\x01bar".into() };
-        let err = services_start_result(&be, &crate::audit::noop(), &subj, params).await.unwrap_err();
+        let err = services_start_result(&test_deps(be), &subj, params).await.unwrap_err();
         assert_eq!(err.code, vaiexia_core::diagnostic::codes::INVALID_PARAMS);
     }
 
@@ -456,7 +414,7 @@ mod tests {
         let be = full_backend();
         let subj = noop_subject();
         let params = ServiceMutateParams { name: "../etc/shadow".into() };
-        let err = services_start_result(&be, &crate::audit::noop(), &subj, params).await.unwrap_err();
+        let err = services_start_result(&test_deps(be), &subj, params).await.unwrap_err();
         assert_eq!(err.code, vaiexia_core::diagnostic::codes::INVALID_PARAMS);
     }
 
@@ -465,7 +423,7 @@ mod tests {
         let be = full_backend();
         let subj = noop_subject();
         let params = ServiceMutateParams { name: "nginx.service".into() };
-        let dto = services_stop_result(&be, &crate::audit::noop(), &subj, params).await.unwrap();
+        let dto = services_stop_result(&test_deps(be), &subj, params).await.unwrap();
         assert_eq!(dto.outcome, "ok");
         assert_eq!(dto.state, crate::backend::ServiceState::Inactive);
     }
@@ -475,7 +433,7 @@ mod tests {
         let be = full_backend();
         let subj = noop_subject();
         let params = ServiceMutateParams { name: "nginx.service".into() };
-        let dto = services_restart_result(&be, &crate::audit::noop(), &subj, params).await.unwrap();
+        let dto = services_restart_result(&test_deps(be), &subj, params).await.unwrap();
         assert_eq!(dto.outcome, "ok");
         assert_eq!(dto.state, crate::backend::ServiceState::Active);
     }

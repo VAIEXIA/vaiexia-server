@@ -35,7 +35,7 @@ pub fn register(builder: ServiceBuilder, deps: &ApiDeps, registry: Arc<JobRegist
     register_scoped(
         builder,
         status_method,
-        deps.audit.clone(),
+        deps,
         ScopeAudit::DenyOnly,
         move |p: JobsStatusParams, _subject: Subject| {
             let registry = Arc::clone(&registry);

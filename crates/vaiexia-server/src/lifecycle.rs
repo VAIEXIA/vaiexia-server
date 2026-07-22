@@ -50,6 +50,7 @@ pub fn build_service(
     let deps = ApiDeps {
         backend: Arc::clone(&backend),
         audit: Arc::clone(&audit),
+        subjects: Some(Arc::clone(&store)),
     };
 
     let modules: Vec<Box<dyn ApiModule>> = vec![
@@ -145,6 +146,9 @@ pub fn build_service_permissive(backend: Arc<SystemBackend>) -> (Arc<Service>, V
     let deps = ApiDeps {
         backend: Arc::clone(&backend),
         audit: crate::audit::noop(),
+        // No identity store in the permissive service: audit is a noop here,
+        // so there is nothing to attribute.
+        subjects: None,
     };
 
     let modules: Vec<Box<dyn ApiModule>> = vec![Box::new(ServerModule {
@@ -588,6 +592,26 @@ mod tests {
             "token.create mutation must be audited"
         );
         assert!(body.contains("latency_us"), "mutation record must carry latency_us");
+        // (b2) ATTRIBUTION PROOF: no record may carry the internal `cap:<key_id>`
+        // handle in the human `subject` field (schema v1 keeps it in cap_key_id).
+        // Every scope/mutation record must name the account instead.
+        assert!(
+            !body.contains("\"subject\":\"cap:"),
+            "audit subject must be the account id, never the cap handle:\n{body}"
+        );
+        for line in body.lines() {
+            let v: serde_json::Value = serde_json::from_str(line).expect("valid JSON line");
+            if v["kind"] == "scope_decision" || v["kind"] == "mutation" {
+                assert_eq!(
+                    v["subject"], "user:admin",
+                    "handler-side record must be attributed to the account: {line}"
+                );
+                assert!(
+                    v["cap_key_id"].is_string(),
+                    "handler-side record must carry the credential handle: {line}"
+                );
+            }
+        }
         // (c) REDACTION PROOF: the minted capability's secret must NOT appear in the log.
         assert!(
             !body.contains(&secret_seg),

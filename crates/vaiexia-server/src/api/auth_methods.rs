@@ -39,7 +39,7 @@ impl crate::api::ApiModule for AuthModule {
         let builder = register_scoped(
             builder,
             claim_method,
-            audit.clone(),
+            deps,
             ScopeAudit::DenyOnly,
             move |p: BootstrapClaimParams, _subject: Subject| {
                 let store = Arc::clone(&store1);
@@ -57,7 +57,7 @@ impl crate::api::ApiModule for AuthModule {
         let builder = register_scoped(
             builder,
             login_method,
-            audit.clone(),
+            deps,
             ScopeAudit::DenyOnly,
             move |p: LoginParams, _subject: Subject| {
                 let store = Arc::clone(&store2);
@@ -73,7 +73,7 @@ impl crate::api::ApiModule for AuthModule {
         let builder = register_scoped(
             builder,
             whoami_method,
-            audit.clone(),
+            deps,
             ScopeAudit::DenyOnly,
             move |_p: WhoamiParams, subject: Subject| {
                 let store = Arc::clone(&store3);
@@ -88,7 +88,7 @@ impl crate::api::ApiModule for AuthModule {
         let builder = register_scoped(
             builder,
             token_create_method,
-            audit.clone(),
+            deps,
             ScopeAudit::DenyOnly,
             move |p: TokenCreateParams, subject: Subject| {
                 let store = Arc::clone(&store4);
@@ -103,7 +103,7 @@ impl crate::api::ApiModule for AuthModule {
         let builder = register_scoped(
             builder,
             token_list_method,
-            audit.clone(),
+            deps,
             ScopeAudit::DenyOnly,
             move |_p: TokenListParams, _subject: Subject| {
                 let store = Arc::clone(&store5);
@@ -118,7 +118,7 @@ impl crate::api::ApiModule for AuthModule {
         register_scoped(
             builder,
             token_revoke_method,
-            audit,
+            deps,
             ScopeAudit::DenyOnly,
             move |p: TokenRevokeParams, subject: Subject| {
                 let store = Arc::clone(&store6);

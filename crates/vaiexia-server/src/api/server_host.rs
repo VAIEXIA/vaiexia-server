@@ -24,7 +24,7 @@ pub fn register(builder: ServiceBuilder, deps: &ApiDeps) -> ServiceBuilder {
     register_scoped(
         builder,
         method,
-        deps.audit.clone(),
+        deps,
         ScopeAudit::DenyOnly,
         move |_p: HostInfoParams, _subject: Subject| {
             let be = Arc::clone(&be);

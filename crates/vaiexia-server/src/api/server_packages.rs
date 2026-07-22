@@ -101,15 +101,13 @@ pub async fn packages_remove_result(
 
 pub fn register(builder: ServiceBuilder, deps: &ApiDeps, registry: Arc<JobRegistry>) -> ServiceBuilder {
     let be = Arc::clone(&deps.backend);
-    let audit = deps.audit.clone();
 
     let be1 = Arc::clone(&be);
-    let audit1 = audit.clone();
     let list_method = Method::new("server.packages.list").expect("valid method");
     let builder = register_scoped(
         builder,
         list_method,
-        audit1,
+        deps,
         ScopeAudit::DenyOnly,
         move |p: PackagesListParams, _subject: Subject| {
             let be = Arc::clone(&be1);
@@ -117,35 +115,33 @@ pub fn register(builder: ServiceBuilder, deps: &ApiDeps, registry: Arc<JobRegist
         },
     );
 
-    let be2 = Arc::clone(&be);
-    let audit2 = audit.clone();
+    let deps2 = deps.clone();
     let reg2 = Arc::clone(&registry);
     let install_method = Method::new("server.packages.install").expect("valid method");
     let builder = register_scoped(
         builder,
         install_method,
-        audit2,
+        deps,
         ScopeAudit::DenyOnly,
         move |p: PackageMutateParams, _subject: Subject| {
-            let be = Arc::clone(&be2);
+            let deps = deps2.clone();
             let reg = Arc::clone(&reg2);
-            async move { packages_install_result(&be, &reg, p).await }
+            async move { packages_install_result(&deps.backend, &reg, p).await }
         },
     );
 
-    let be3 = Arc::clone(&be);
-    let audit3 = audit.clone();
+    let deps3 = deps.clone();
     let reg3 = Arc::clone(&registry);
     let remove_method = Method::new("server.packages.remove").expect("valid method");
     register_scoped(
         builder,
         remove_method,
-        audit3,
+        deps,
         ScopeAudit::DenyOnly,
         move |p: PackageMutateParams, _subject: Subject| {
-            let be = Arc::clone(&be3);
+            let deps = deps3.clone();
             let reg = Arc::clone(&reg3);
-            async move { packages_remove_result(&be, &reg, p).await }
+            async move { packages_remove_result(&deps.backend, &reg, p).await }
         },
     )
 }

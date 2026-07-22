@@ -89,7 +89,7 @@ pub fn register(builder: ServiceBuilder, deps: &ApiDeps) -> ServiceBuilder {
     register_scoped(
         builder,
         query_method,
-        deps.audit.clone(),
+        deps,
         ScopeAudit::AuditAllow,
         move |p: LogsQueryParams, _subject: Subject| {
             let be = Arc::clone(&be);
