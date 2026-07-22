@@ -53,3 +53,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 vaiexia-core = { workspace = true, features = ["ws"] }
 futures = "0.3"
 rcgen = "0.14"
+# `cargo_bench_support` is required for `cargo bench` to drive criterion; the
+# rest of the default features (plotters/rayon HTML reports) are dead weight here.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "hotpath"
+harness = false
