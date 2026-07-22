@@ -45,6 +45,9 @@ impl JournaldLogs {
     }
 
     /// Construct and start a background follow task.
+    // No `Default` on purpose: construction SPAWNS a journalctl child and a
+    // task that outlives the call. `JournaldLogs::default()` would hide that.
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         let (tx, _) = broadcast::channel(256);
         let tx_clone = tx.clone();

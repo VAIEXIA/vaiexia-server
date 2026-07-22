@@ -1,8 +1,6 @@
 //! Real PackageManager backed by OS package tools and vaiexia-privd.
 //! Unix-only — process execution and unix socket.
 
-#![cfg(unix)]
-
 use std::sync::Arc;
 use std::time::Duration;
 

@@ -9,9 +9,7 @@
 //! - One job at a time (mutex), hard timeout, cleared env, absolute paths
 //! - Writes audit line to stderr on every exec operation
 //!
-//! Unix-only — compiled only on unix targets.
-
-#![cfg(unix)]
+//! Unix-only — the module is `#[cfg(unix)]` at its declaration in main.rs.
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -319,7 +317,7 @@ pub fn handle_connection(
         Err(e) => {
             eprintln!("privd: deserialize error: {e}");
             let resp = PrivResponse::Error { message: "protocol error".into() };
-            let _ = write_response(&mut stream, &resp);
+            write_response(&mut stream, &resp);
             return;
         }
     };
@@ -328,7 +326,7 @@ pub fn handle_connection(
     let resp = dispatch(&req, kind, job_lock, allowlist);
 
     // Write response
-    let _ = write_response(&mut stream, &resp);
+    write_response(&mut stream, &resp);
 }
 
 fn write_response(stream: &mut UnixStream, resp: &PrivResponse) {

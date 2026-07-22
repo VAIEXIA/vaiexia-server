@@ -1,8 +1,6 @@
 //! Client for the `vaiexia-privd` unix socket.
 //! Unix-only — package writes are delegated to the privileged daemon.
 
-#![cfg(unix)]
-
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
