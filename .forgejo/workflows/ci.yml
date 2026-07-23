@@ -100,7 +100,7 @@ jobs:
   smoke:
     name: linux · daemon smoke (http, auth refusal, audit, shutdown)
     runs-on: ubuntu-24.04
-    if: ${{ github.server_url == 'https://git.vai-rice.space' }}
+    if: ${{ !contains(github.server_url, 'codeberg.org') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -245,7 +245,7 @@ jobs:
   packaging:
     name: linux · packaging artifacts
     runs-on: ubuntu-24.04
-    if: ${{ github.server_url == 'https://git.vai-rice.space' }}
+    if: ${{ !contains(github.server_url, 'codeberg.org') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -288,7 +288,7 @@ jobs:
   deny:
     name: linux · cargo-deny
     runs-on: ubuntu-24.04
-    if: ${{ github.server_url == 'https://git.vai-rice.space' }}
+    if: ${{ !contains(github.server_url, 'codeberg.org') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -324,7 +324,7 @@ jobs:
   windows:
     name: windows · test
     runs-on: windows
-    if: ${{ github.server_url == 'https://git.vai-rice.space' }}
+    if: ${{ !contains(github.server_url, 'codeberg.org') }}
     steps:
       - uses: actions/checkout@v4
         with:
