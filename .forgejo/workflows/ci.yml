@@ -1,0 +1,343 @@
+name: CI
+
+# Primary gate. Runs on the project's own Forgejo host (VIA GIT).
+#
+# Why CI matters more here than for a typical crate: the development host is
+# Windows, and Windows never COMPILES the `#[cfg(unix)]` /
+# `#[cfg(target_os = "linux")]` half of this daemon — systemd, journald,
+# packages, privd. A green local `cargo test` is structurally unable to see
+# that code. This is the first place it is compiled AND executed.
+#
+# Scope limit, stated honestly: the runner executes jobs in unprivileged
+# containers, so there is no systemd as PID 1, no system D-Bus and no
+# journald here. Everything in this file is what a container can prove.
+# The tests that need a real init system live in .github/workflows/
+# system-behavior.yml, which runs on a VM runner. Nothing in this file should
+# claim to cover them.
+#
+# `vaiexia-core` is a path dependency (`../vaiexia-core`), so every job checks
+# it out as a sibling directory. CORE_REF selects the revision: `main` tracks
+# what local development builds against, at the price of letting a core change
+# break this repo's CI. Pin it to a tag or sha when that trade stops paying.
+
+on:
+  push:
+  pull_request:
+
+env:
+  CORE_REF: main
+  CARGO_TERM_COLOR: always
+  # Heavy jobs run only on the project's own host; mirrors get the build gate
+  # only, so enabling Actions on a mirror cannot queue jobs forever waiting
+  # for labels that mirror does not have.
+  PRIMARY_HOST: https://git.vai-rice.space
+
+jobs:
+  # ── Build gate: this is the one that runs everywhere ──────────────────────
+  test:
+    name: linux · test + clippy + no-default-features
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vaiexia-server
+      - uses: actions/checkout@v4
+        with:
+          repository: VAIEXIA/vaiexia-core
+          ref: ${{ env.CORE_REF }}
+          path: vaiexia-core
+
+      - name: System packages
+        run: |
+          set -eux
+          SUDO=""; command -v sudo >/dev/null && SUDO="sudo"
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config
+
+      - name: Install Rust (channel from rust-toolchain.toml)
+        run: |
+          set -eux
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cd vaiexia-server
+          rustup show active-toolchain
+          rustup component add clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            vaiexia-server/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('vaiexia-server/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # The first execution anywhere of the unix-gated unit tests: privd socket
+      # framing and peercred plumbing, journald line parsing, the allowlist.
+      - name: Test
+        working-directory: vaiexia-server
+        run: cargo test --workspace --locked
+
+      - name: Clippy
+        working-directory: vaiexia-server
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # The posture the Windows host cross-checks with. Keeps a build that only
+      # works with the `tls` feature enabled from slipping through.
+      - name: Build without default features
+        working-directory: vaiexia-server
+        run: cargo check --workspace --no-default-features --locked
+
+  # ── Does the assembled binary actually run? ───────────────────────────────
+  # Unit tests prove the pieces. This proves the daemon starts, serves, refuses
+  # unauthenticated calls, writes its audit trail at the right mode and shuts
+  # down on SIGTERM. None of it needs an init system.
+  smoke:
+    name: linux · daemon smoke (http, auth refusal, audit, shutdown)
+    runs-on: ubuntu-24.04
+    if: ${{ github.server_url == 'https://git.vai-rice.space' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vaiexia-server
+      - uses: actions/checkout@v4
+        with:
+          repository: VAIEXIA/vaiexia-core
+          ref: ${{ env.CORE_REF }}
+          path: vaiexia-core
+
+      - name: System packages
+        run: |
+          set -eux
+          SUDO=""; command -v sudo >/dev/null && SUDO="sudo"
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config
+
+      - name: Install Rust
+        run: |
+          set -eux
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain none --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          cd vaiexia-server && rustup show active-toolchain
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            vaiexia-server/target
+          key: cargo-smoke-${{ hashFiles('vaiexia-server/Cargo.lock') }}
+          restore-keys: cargo-smoke-
+
+      - name: Build
+        working-directory: vaiexia-server
+        run: cargo build --release --locked -p vaiexia-server
+
+      - name: CLI contract
+        working-directory: vaiexia-server
+        run: |
+          set -eux
+          BIN=target/release/vaiexia-server
+          "$BIN" --version
+          # An unknown argument must fail loudly instead of starting the daemon
+          # on default settings — a typo in a unit file is a real scenario.
+          set +e
+          "$BIN" --definitely-not-a-flag
+          rc=$?
+          set -e
+          test "$rc" -eq 2 || { echo "unknown flag exited $rc, expected 2"; exit 1; }
+
+      - name: Config gate accepts valid and refuses obfs
+        working-directory: vaiexia-server
+        run: |
+          set -eux
+          WORK="${RUNNER_TEMP:-/tmp}"
+          mkdir -p "$WORK/state"
+          cat >"$WORK/server.toml" <<EOF
+          state_dir = "$WORK/state"
+
+          [[listeners]]
+          kind = "http"
+          bind = "127.0.0.1:17443"
+          EOF
+          target/release/vaiexia-server --check-config --config "$WORK/server.toml"
+
+          # obfs listeners are refused in v1; --check-config must be the place
+          # an operator finds that out.
+          cat >"$WORK/bad.toml" <<EOF
+          state_dir = "$WORK/state"
+
+          [[listeners]]
+          kind = "obfs-tcp"
+          bind = "127.0.0.1:19000"
+          EOF
+          set +e
+          target/release/vaiexia-server --check-config --config "$WORK/bad.toml"
+          rc=$?
+          set -e
+          test "$rc" -ne 0 || { echo "obfs listener was accepted by --check-config"; exit 1; }
+
+      - name: Serve, refuse, audit, shut down
+        working-directory: vaiexia-server
+        run: |
+          set -eux
+          WORK="${RUNNER_TEMP:-/tmp}"
+          target/release/vaiexia-server --config "$WORK/server.toml" &
+          pid=$!
+
+          # Wait for the listener instead of sleeping a guessed interval.
+          for _ in $(seq 1 60); do
+            curl -sf http://127.0.0.1:17443/hello >/dev/null && break
+            sleep 0.25
+          done
+          curl -sf http://127.0.0.1:17443/hello
+
+          # A domain method with no capability must come back UNAUTHENTICATED.
+          # Note the envelope: `version` is an object, not an integer — sending
+          # the wrong shape would be rejected as malformed and this assertion
+          # would pass for the wrong reason.
+          body=$(curl -s -X POST http://127.0.0.1:17443/rpc \
+            -H 'content-type: application/json' \
+            -d '{"id":"smoke-1","version":{"major":1,"minor":0},"method":"server.host.info","params":{}}')
+          echo "$body"
+          echo "$body" | grep -q UNAUTHENTICATED \
+            || { echo "an unauthenticated call was NOT refused"; exit 1; }
+
+          # First run must mint a bootstrap code readable only by its owner.
+          test -f "$WORK/state/bootstrap.code"
+          mode=$(stat -c '%a' "$WORK/state/bootstrap.code")
+          test "$mode" = "600" || { echo "bootstrap.code mode $mode, expected 600"; exit 1; }
+
+          # SIGTERM must produce a graceful exit, not a kill.
+          kill -TERM "$pid"
+          for _ in $(seq 1 60); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.25
+          done
+          if kill -0 "$pid" 2>/dev/null; then
+            echo "daemon still alive 15s after SIGTERM"; kill -9 "$pid"; exit 1
+          fi
+          wait "$pid" || true
+
+          # The audit trail must exist at 0600 and must contain both the
+          # lifecycle record and the refused call.
+          test -f "$WORK/state/audit/audit.jsonl"
+          amode=$(stat -c '%a' "$WORK/state/audit/audit.jsonl")
+          test "$amode" = "600" || { echo "audit.jsonl mode $amode, expected 600"; exit 1; }
+          grep -q '"kind":"lifecycle"' "$WORK/state/audit/audit.jsonl" \
+            || { echo "no lifecycle record in the audit trail"; cat "$WORK/state/audit/audit.jsonl"; exit 1; }
+          grep -q '"kind":"auth_decision"' "$WORK/state/audit/audit.jsonl" \
+            || { echo "the refused call left no auth_decision record"; cat "$WORK/state/audit/audit.jsonl"; exit 1; }
+
+  # ── Packaging artifacts must be valid, not merely present ─────────────────
+  # systemd-analyze parses unit files without needing systemd to be running,
+  # so this works in a container even though starting a unit does not.
+  packaging:
+    name: linux · packaging artifacts
+    runs-on: ubuntu-24.04
+    if: ${{ github.server_url == 'https://git.vai-rice.space' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          set -eux
+          SUDO=""; command -v sudo >/dev/null && SUDO="sudo"
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends systemd nodejs
+
+      - name: Validate systemd units
+        run: |
+          set -eux
+          SUDO=""; command -v sudo >/dev/null && SUDO="sudo"
+          # systemd-analyze rejects a unit whose ExecStart binary is absent, so
+          # stand in placeholders: this step checks directive validity, not
+          # installation.
+          $SUDO install -m 0755 /dev/null /usr/bin/vaiexia-server
+          $SUDO install -m 0755 /dev/null /usr/bin/vaiexia-privd
+          systemd-analyze verify packaging/systemd/vaiexia-server.service
+          systemd-analyze verify packaging/systemd/vaiexia-privd.service
+          systemd-analyze verify packaging/systemd/vaiexia-privd.socket
+
+      - name: Report the sandbox posture (informational)
+        run: systemd-analyze security packaging/systemd/vaiexia-server.service || true
+
+      - name: Validate sysusers and tmpfiles
+        run: |
+          set -eux
+          systemd-sysusers --dry-run packaging/sysusers/vaiexia.conf
+          systemd-tmpfiles --dry-run --create packaging/tmpfiles/vaiexia.conf
+
+      - name: Polkit rules must be parseable JavaScript
+        run: |
+          set -eux
+          node --check packaging/polkit/50-vaiexia-manage-units.rules
+          node --check packaging/polkit/50-vaiexia-manage-units.allowlist.rules.example
+
+  # ── Supply chain ──────────────────────────────────────────────────────────
+  deny:
+    name: linux · cargo-deny
+    runs-on: ubuntu-24.04
+    if: ${{ github.server_url == 'https://git.vai-rice.space' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vaiexia-server
+      - uses: actions/checkout@v4
+        with:
+          repository: VAIEXIA/vaiexia-core
+          ref: ${{ env.CORE_REF }}
+          path: vaiexia-core
+
+      - name: Tools
+        run: |
+          set -eux
+          SUDO=""; command -v sudo >/dev/null && SUDO="sudo"
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends curl ca-certificates tar
+
+      # A prebuilt binary rather than `cargo install`: this gate should cost
+      # seconds, not a from-source build of a linter.
+      - name: Install cargo-deny
+        run: |
+          set -eux
+          ver=0.16.4
+          url="https://github.com/EmbarkStudios/cargo-deny/releases/download/${ver}/cargo-deny-${ver}-x86_64-unknown-linux-musl.tar.gz"
+          curl -sSfL "$url" | tar xz --strip-components=1 -C /usr/local/bin --wildcards '*/cargo-deny'
+          cargo-deny --version
+
+      - name: Check advisories, bans, licenses and sources
+        working-directory: vaiexia-server
+        run: cargo-deny check
+
+  # ── Keep the development host's platform green ────────────────────────────
+  windows:
+    name: windows · test
+    runs-on: windows
+    if: ${{ github.server_url == 'https://git.vai-rice.space' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vaiexia-server
+      - uses: actions/checkout@v4
+        with:
+          repository: VAIEXIA/vaiexia-core
+          ref: ${{ env.CORE_REF }}
+          path: vaiexia-core
+      - name: Test
+        working-directory: vaiexia-server
+        shell: bash
+        run: |
+          set -eux
+          rustup show active-toolchain
+          cargo test --workspace --locked

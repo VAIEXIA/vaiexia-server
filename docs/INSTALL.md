@@ -620,10 +620,34 @@ println!("verified {count} records");
 
 ## 9. Security Release Checklist
 
-The following checks must pass before any release.  **There is no CI workflow
-in this repository yet** — nothing runs these automatically.  Until a pipeline
-exists they are a manual gate, and the Linux-only ones require a real
-systemd host (the Windows dev host cannot run them).
+Most of these checks are automated.  Read this section as "what runs, where,
+and what is still on you" — an unrun check that is described as automatic is
+worse than one honestly listed as manual.
+
+### What CI runs
+
+| Where | Workflow | Covers |
+|---|---|---|
+| `git.vai-rice.space` (primary) | `.forgejo/workflows/ci.yml` | Every push: `cargo test --workspace` (this is where the Linux-gated privd/journald/package code is compiled and executed at all), clippy with warnings denied, the `--no-default-features` build, a daemon smoke test (starts, serves `/hello`, refuses an unauthenticated call, writes `bootstrap.code` and `audit.jsonl` at mode 0600, exits gracefully on SIGTERM), packaging validation (`systemd-analyze verify`, `systemd-sysusers`/`systemd-tmpfiles` dry runs, polkit rules parsed), `cargo deny`, and a Windows test job. |
+| `git.vai-rice.space` (primary) | `.forgejo/workflows/nightly.yml` | Nightly: all seven fuzz targets at a fixed per-target budget, and a debian + fedora matrix that builds, tests and runs `--check-config` on each. |
+| `github.com` (VM runner) | `.github/workflows/system-behavior.yml` | On push to `main`, on PR and weekly: the `#[ignore]`d `--features system-it` tests against a real system D-Bus and real journald, and a real `Type=notify` unit start proving `sd_notify` sends `READY=1`. |
+
+The split is not arbitrary.  The primary runner executes jobs in unprivileged
+containers, which have no systemd as PID 1, no system D-Bus and no journald;
+anything needing an init system therefore runs on a VM runner instead.
+
+### What CI still does NOT cover
+
+- **privd end to end** — socket activation, the SO_PEERCRED gate and package
+  manager dispatch are compiled and unit-tested, but no job installs the socket
+  unit and drives a real package operation as an unprivileged daemon.
+- **polkit enforcement** — the rules are parsed, never evaluated against a real
+  `org.freedesktop.systemd1.manage-units` request.
+- **TLS listener against a real client** — `serve_tls` has unit coverage; no job
+  performs a handshake with a generated certificate chain.
+- **Upgrade and rollback** of an installed deployment.
+
+Treat these as manual pre-release steps on a staging host.
 
 ### Supply-chain check (`cargo deny`)
 
@@ -634,7 +658,7 @@ cargo deny check
 Checks advisories (yanked crates), banned duplicate versions, wildcard
 dependencies, license allowlist, and source registry policy against
 `deny.toml` at the workspace root.  Run `cargo install cargo-deny
---locked` to run it locally.
+--locked` to run it locally; CI runs it on every push.
 
 ### Fuzz targets (nightly toolchain only)
 
@@ -653,8 +677,10 @@ cargo +nightly fuzz run audit_chain  -- -runs=200000
 
 Fuzz targets live in `crates/vaiexia-server/fuzz/` (own workspace; not a
 member of the main workspace).  Run them from that directory or pass `-p
-vaiexia-server-fuzz` to cargo-fuzz.  A stable toolchain cannot run them, so
-they are a manual pre-release step today.  A portable adversarial corpus test
+vaiexia-server-fuzz` to cargo-fuzz.  The nightly workflow runs all seven with
+a fixed per-target time budget — enough to catch a regression against the
+committed corpus, not a substitute for a deliberate long fuzzing campaign,
+which remains a manual exercise.  A portable adversarial corpus test
 (`crates/vaiexia-server/tests/adversarial_corpus.rs`) covers the same parsers
 on stable and runs on every `cargo test`.
 
@@ -664,10 +690,12 @@ on stable and runs on every `cargo test`.
 systemd-analyze verify /etc/systemd/system/vaiexia-server.service
 ```
 
-This is a live systemd check and must run on a real systemd host — it is not
-runnable on the Windows dev host, and no automation runs it today.  The same
-applies to everything else that only exists at runtime on Linux: socket
-activation, polkit enforcement, privd dispatch, and `sd_notify` readiness.
+This is a systemd check and must run on a Linux host — it is not runnable on
+the Windows dev host.  CI runs `systemd-analyze verify` against the shipped
+unit files on every push, and separately starts the daemon under a real
+`Type=notify` unit to prove `sd_notify` readiness.  Socket activation, polkit
+enforcement and privd dispatch remain uncovered by automation — verify those
+on a staging host.
 
 ### Config validation (any host with the binary)
 

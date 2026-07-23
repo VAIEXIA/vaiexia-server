@@ -1,0 +1,144 @@
+name: Nightly
+
+# Slow gates that should not sit between a push and its verdict, but that must
+# run on a schedule rather than "when somebody remembers". Both fit in an
+# unprivileged container, so they belong on the project's own runner.
+#
+#   * fuzz — the seven libFuzzer targets in crates/vaiexia-server/fuzz cover
+#     every attacker-facing parser. Short per-target budgets: this is a
+#     regression net over the committed corpus, not a fuzzing campaign. A real
+#     campaign is a deliberate, long-running exercise on a dedicated machine.
+#   * distro matrix — the daemon targets whatever distribution the operator
+#     runs, and the package backend branches on os-release. Building and
+#     testing on debian and fedora catches divergence that a single ubuntu
+#     image hides.
+#
+# Note the fuzz crate is intentionally OUTSIDE the workspace (root Cargo.toml
+# `exclude`), because cargo-fuzz needs nightly; hence its own build steps.
+
+on:
+  schedule:
+    - cron: '23 3 * * *'
+  workflow_dispatch:
+
+env:
+  CORE_REF: main
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz · all parsers
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vaiexia-server
+      - uses: actions/checkout@v4
+        with:
+          repository: VAIEXIA/vaiexia-core
+          ref: ${{ env.CORE_REF }}
+          path: vaiexia-core
+
+      - name: System packages
+        run: |
+          set -eux
+          SUDO=""; command -v sudo >/dev/null && SUDO="sudo"
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config
+
+      # libFuzzer needs nightly and a matching LLVM; cargo-fuzz drives both.
+      - name: Nightly toolchain and cargo-fuzz
+        run: |
+          set -eux
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+              | sh -s -- -y --default-toolchain nightly --profile minimal
+          fi
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.cargo/bin:$PATH"
+          rustup toolchain install nightly --profile minimal
+          rustup component add llvm-tools-preview --toolchain nightly
+          cargo +nightly install cargo-fuzz --locked
+
+      - name: Fuzz every target
+        working-directory: vaiexia-server/crates/vaiexia-server/fuzz
+        run: |
+          set -eux
+          # Budget per target. Raise deliberately; do not raise silently — a
+          # longer nightly that nobody watches is not a stronger gate.
+          BUDGET=120
+          for t in package_name unit_name journal_line priv_request token_parse pkg_list audit_chain; do
+            cargo +nightly fuzz run "$t" -- -max_total_time="$BUDGET" -print_final_stats=1
+          done
+
+      # A crash leaves an input under fuzz/artifacts; keep it, otherwise the
+      # only evidence of the failure is a log line in a job nobody reads.
+      - name: Preserve crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: vaiexia-server/crates/vaiexia-server/fuzz/artifacts/
+          if-no-files-found: ignore
+
+  distro:
+    name: distro · ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image:
+          - debian:stable
+          - fedora:latest
+    steps:
+      - name: Distro packages
+        run: |
+          set -eux
+          if command -v apt-get >/dev/null; then
+            apt-get update
+            apt-get install -y --no-install-recommends curl ca-certificates build-essential pkg-config git
+          else
+            dnf install -y curl ca-certificates gcc make pkgconf-pkg-config git
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          path: vaiexia-server
+      - uses: actions/checkout@v4
+        with:
+          repository: VAIEXIA/vaiexia-core
+          ref: ${{ env.CORE_REF }}
+          path: vaiexia-core
+
+      - name: Install Rust
+        run: |
+          set -eux
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --default-toolchain none --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Test
+        working-directory: vaiexia-server
+        run: cargo test --workspace --locked
+
+      # The package backend picks its manager from os-release plus the binary
+      # path, and both must agree. On debian that has to resolve to apt, on
+      # fedora to dnf — the one thing this matrix exists to prove. `--version`
+      # exercises the probe path without mutating the container.
+      - name: The daemon starts and validates config on this distro
+        working-directory: vaiexia-server
+        run: |
+          set -eux
+          cargo build --release --locked -p vaiexia-server
+          ./target/release/vaiexia-server --version
+          mkdir -p /tmp/vx-state
+          cat >/tmp/vx.toml <<'EOF'
+          state_dir = "/tmp/vx-state"
+
+          [[listeners]]
+          kind = "http"
+          bind = "127.0.0.1:17445"
+          EOF
+          ./target/release/vaiexia-server --check-config --config /tmp/vx.toml

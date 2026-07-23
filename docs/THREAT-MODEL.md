@@ -74,10 +74,11 @@ remain unmitigated in v1.
   parameter cannot inject fake log lines or bloat the audit file.
 - **Fuzz-tested parsers**: all attacker-facing parsers (package name, unit name,
   journal line, privd request frame, token parse, pkg-list, audit chain) are
-  covered by seven cargo-fuzz targets, run at 200,000 iterations each as a
-  pre-release step (nightly toolchain required; **there is no CI workflow in
-  this repository yet**, so nothing runs them automatically — see INSTALL.md
-  §9).  A portable adversarial corpus test does run on every `cargo test`.
+  covered by seven cargo-fuzz targets (nightly toolchain required).  The
+  nightly CI workflow runs all seven with a fixed per-target time budget; that
+  is a regression net over the committed corpus, not a long fuzzing campaign,
+  which stays a deliberate manual exercise (see INSTALL.md §9).  A portable
+  adversarial corpus test also runs on every `cargo test`.
 
 ### 5. Compromised daemon (post-exploit containment)
 
@@ -125,8 +126,8 @@ packages.
   advisory database (yanked crates denied), a license allowlist (MIT, Apache-2.0,
   BSD-2-Clause, BSD-3-Clause, ISC, and a small set of named exceptions), ban on
   wildcard version requirements, and restriction to the crates.io registry.
-  This check is a required manual gate before any release — it is not wired to
-  automation, because this repository has no CI workflow yet.
+  CI runs this check on every push, so a dependency that picks up an advisory
+  or an unlisted license breaks the build rather than reaching a release.
 - **`rustls` for TLS**: no OpenSSL in the TLS stack.
 
 ### 7. Log tamper / forensic attacker

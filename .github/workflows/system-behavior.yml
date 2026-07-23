@@ -1,0 +1,149 @@
+name: System behavior
+
+# The only jobs that live here are the ones the project's own runner cannot
+# host. VIA GIT (git.vai-rice.space) is the primary CI — see
+# .forgejo/workflows/ci.yml for the build gate, the daemon smoke test,
+# packaging validation and the supply-chain check. That runner executes jobs in
+# unprivileged containers, which means no systemd as PID 1, no system D-Bus and
+# no journald.
+#
+# Everything below needs a real init system, so it runs on a VM runner:
+#   * tests/systemd_it.rs and tests/backends_it.rs — cfg'd to Linux plus
+#     `--features system-it` and marked #[ignore]; they talk to the real
+#     system bus and to real journald. Until this workflow existed they had
+#     never executed anywhere.
+#   * `Type=notify` readiness — `systemctl start` returns only once the daemon
+#     has sent READY=1, so a broken sd_notify fails this job instead of
+#     silently making the shipped unit hang for an operator.
+#
+# `vaiexia-core` is a path dependency (`../vaiexia-core`), hence the sibling
+# checkout.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly, so a change in the runner image or in systemd itself surfaces
+    # even during a quiet period.
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+env:
+  CORE_REF: main
+  CARGO_TERM_COLOR: always
+
+jobs:
+  system-it:
+    name: systemd + journald integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vaiexia-server
+      - uses: actions/checkout@v4
+        with:
+          repository: VAIEXIA/vaiexia-core
+          ref: ${{ env.CORE_REF }}
+          path: vaiexia-core
+
+      - name: Install toolchain (channel from rust-toolchain.toml)
+        working-directory: vaiexia-server
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vaiexia-server
+
+      # Fail here, with a readable message, rather than inside a test — a
+      # runner image that quietly stopped booting systemd would otherwise look
+      # like a code regression.
+      - name: The environment must actually provide an init system
+        run: |
+          set -euxo pipefail
+          systemctl --version
+          systemctl is-system-running || true   # "degraded" is fine, "offline" is not
+          busctl --system --no-pager list | head -n 5
+          journalctl --no-pager -n 1 >/dev/null
+
+      - name: Run the ignored system integration tests
+        working-directory: vaiexia-server
+        run: cargo test -p vaiexia-server --features system-it --locked -- --ignored --nocapture
+
+  notify-readiness:
+    name: sd_notify under Type=notify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: vaiexia-server
+      - uses: actions/checkout@v4
+        with:
+          repository: VAIEXIA/vaiexia-core
+          ref: ${{ env.CORE_REF }}
+          path: vaiexia-core
+
+      - name: Install toolchain
+        working-directory: vaiexia-server
+        run: rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: vaiexia-server
+
+      - name: Build
+        working-directory: vaiexia-server
+        run: cargo build --release --locked -p vaiexia-server
+
+      - name: Start under systemd and require READY=1
+        working-directory: vaiexia-server
+        run: |
+          set -euxo pipefail
+          sudo install -m 0755 target/release/vaiexia-server /usr/local/bin/vaiexia-server
+          sudo mkdir -p /etc/vaiexia /var/lib/vaiexia-smoke
+          sudo tee /etc/vaiexia/smoke.toml >/dev/null <<'EOF'
+          state_dir = "/var/lib/vaiexia-smoke"
+
+          [[listeners]]
+          kind = "http"
+          bind = "127.0.0.1:17444"
+          EOF
+          sudo tee /etc/systemd/system/vaiexia-smoke.service >/dev/null <<'EOF'
+          [Unit]
+          Description=VAIEXIA daemon readiness check
+
+          [Service]
+          Type=notify
+          NotifyAccess=main
+          ExecStartPre=/usr/local/bin/vaiexia-server --check-config --config /etc/vaiexia/smoke.toml
+          ExecStart=/usr/local/bin/vaiexia-server --config /etc/vaiexia/smoke.toml
+          TimeoutStartSec=20
+          TimeoutStopSec=20
+          EOF
+          sudo systemctl daemon-reload
+
+          # With Type=notify this call blocks until READY=1 arrives. If notify
+          # were a no-op the unit would sit in "activating" until
+          # TimeoutStartSec and this would fail — which is precisely what an
+          # operator would otherwise discover in production.
+          sudo systemctl start vaiexia-smoke.service
+          systemctl is-active vaiexia-smoke.service
+
+          # Serving, not merely "started".
+          curl -sf http://127.0.0.1:17444/hello
+
+          # Stop must be graceful too: STOPPING=1 then a clean exit.
+          sudo systemctl stop vaiexia-smoke.service
+          if systemctl is-active --quiet vaiexia-smoke.service; then
+            echo "unit still active after stop"; exit 1
+          fi
+          # A non-zero result code here means the daemon died rather than exited.
+          sudo systemctl show vaiexia-smoke.service -p Result --value | tee /tmp/result
+          test "$(cat /tmp/result)" = "success"
+
+      - name: Unit journal (on failure and on success alike)
+        if: always()
+        run: sudo journalctl -u vaiexia-smoke.service --no-pager | tail -n 40
